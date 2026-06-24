@@ -9,6 +9,9 @@ pub mod sched;
 pub mod vasm;
 pub mod vfs;
 pub mod ipc;
+pub mod compress;
+pub mod web;
+
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

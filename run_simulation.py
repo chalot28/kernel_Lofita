@@ -676,6 +676,9 @@ def interactive_shell():
             print("  vfs list                                   [VFS] List active descriptors for active session")
             print("  ipc send <port_id> <message>               [IPC] Send a message, waking up any blocked thread")
             print("  ipc recv <port_id> <thread_id>             [IPC] Read message or block thread if empty")
+            print("  compress <text>                            [LZ4] Compress text using lossless RLE engine")
+            print("  decompress <hex>                           [LZ4] Decompress RLE hex data")
+            print("  webview open <url>                         [WebKit] Spawn WebView container and render HTML")
             print("  tick <seconds>                             Advance the system clock to trigger timeouts")
             print("  exit                                       Quit the shell")
             
@@ -882,6 +885,74 @@ def interactive_shell():
                     print(f"IPC: No messages on Port {port_id}. Thread {thread_id} BLOCKED in scheduler.")
             except ValueError:
                 print("Error: Invalid Port or Thread ID.")
+
+        elif cmd == "compress":
+            if not args:
+                print("Usage: compress <text>")
+                continue
+            text = " ".join(args)
+            data = text.encode("utf-8")
+            compressed = []
+            i = 0
+            while i < len(data):
+                run_len = 1
+                while i + run_len < len(data) and data[i + run_len] == data[i] and run_len < 255:
+                    run_len += 1
+                compressed.append(run_len)
+                compressed.append(data[i])
+                i += run_len
+            compressed_hex = "".join(f"{x:02x}" for x in compressed)
+            ratio = (len(compressed) / len(data)) * 100
+            print(f"[LZ4 Engine] Original size: {len(data)} bytes")
+            print(f"[LZ4 Engine] Compressed size: {len(compressed)} bytes (Ratio: {ratio:.1f}%)")
+            print(f"[LZ4 Engine] Hex payload: {compressed_hex}")
+
+        elif cmd == "decompress":
+            if not args:
+                print("Usage: decompress <hex>")
+                continue
+            hex_str = args[0]
+            try:
+                compressed = bytes.fromhex(hex_str)
+                if len(compressed) % 2 != 0:
+                    print("Error: Invalid compressed payload format (odd length).")
+                    continue
+                decompressed = []
+                i = 0
+                while i < len(compressed):
+                    count = compressed[i]
+                    byte = compressed[i+1]
+                    decompressed.extend([byte] * count)
+                    i += 2
+                decoded = bytes(decompressed).decode("utf-8")
+                print(f"[LZ4 Engine] Decompressed text: \"{decoded}\"")
+            except Exception as e:
+                print(f"Error decompressing: {str(e)}")
+
+        elif cmd == "webview" and len(args) >= 2 and args[0] == "open":
+            url = args[1]
+            if kernel.check_capability(current_session_id, Capability.MEM_ALLOC):
+                fb_size = 1024 * 768 * 4
+                fb_virtual_addr = 0xD0000000
+                log_rust("WebKit: Spawning rendering task...")
+                kernel.scheduler.spawn(current_session_id, "WebKitRenderTask", rip=0xD0000000)
+                print(f"[WebKit] Allocating Framebuffer: {fb_size} bytes (~3MB). Address: 0x{fb_virtual_addr:08X}")
+                print("\n+-------------------------------------------------------------+")
+                print("| [WebKit WebView]                                            |")
+                print("|                                                             |")
+                if "google.com" in url:
+                    print("|   Google Search Engine                                      |")
+                    print("|   [ Search Input: ____________________ ] [ Search Button ]  |")
+                elif "lorifa.org" in url:
+                    print("|   Welcome to Lorifa Monolithic OS Project                   |")
+                    print("|   Active core: Zig PPA + Rust VASM + WebKit webview         |")
+                else:
+                    print(f"|   Loading URL: {url:<45} |")
+                    print("|   HTTP 200 OK: Content Loaded                               |")
+                print("|                                                             |")
+                print("+-------------------------------------------------------------+\n")
+            else:
+                log_alert("WebKit WebView: Failed to open. Lacks MEM_ALLOC capability.")
 
         elif cmd == "tick":
             if not args:
