@@ -18,21 +18,21 @@
 //   Bits 12-51 Physical address (4KB-aligned → bits 11:0 = 0)
 //   Bit 63 NX  — No-Execute (requires EFER.NXE=1)
 
-const vga = @import("../../drivers/vga.zig");
-const ppa = @import("../../mm/ppa.zig");
+const vga = @import("../../../drivers/vga.zig");
+const ppa = @import("../../../mm/ppa.zig");
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-pub const PAGE_SIZE:  usize = 4096;
+pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_SHIFT: usize = 12;
 pub const PT_ENTRIES: usize = 512;
 
 /// Page entry flags exposed to callers
-pub const PF_PRESENT:    u64 = 1 << 0;
-pub const PF_WRITABLE:   u64 = 1 << 1;
-pub const PF_USER:       u64 = 1 << 2;
+pub const PF_PRESENT: u64 = 1 << 0;
+pub const PF_WRITABLE: u64 = 1 << 1;
+pub const PF_USER: u64 = 1 << 2;
 pub const PF_NO_EXECUTE: u64 = 1 << 63;
 
 // Mask to extract 4KB-aligned physical address from a PTE
@@ -46,7 +46,9 @@ const RawTable = struct {
     entries: [PT_ENTRIES]u64 align(PAGE_SIZE),
 
     fn zeroed() RawTable {
-        return .{ .entries = [_]u64{0} ** PT_ENTRIES };
+        var tbl: RawTable = undefined;
+        @memset(&tbl.entries, 0);
+        return tbl;
     }
 
     fn get_phys(self: *const RawTable) u64 {
@@ -61,18 +63,18 @@ const RawTable = struct {
 const VaIndices = struct {
     pml4: usize,
     pdpt: usize,
-    pd:   usize,
-    pt:   usize,
-    off:  usize,
+    pd: usize,
+    pt: usize,
+    off: usize,
 };
 
 fn va_split(vaddr: u64) VaIndices {
     return VaIndices{
         .pml4 = @intCast((vaddr >> 39) & 0x1FF),
         .pdpt = @intCast((vaddr >> 30) & 0x1FF),
-        .pd   = @intCast((vaddr >> 21) & 0x1FF),
-        .pt   = @intCast((vaddr >> 12) & 0x1FF),
-        .off  = @intCast(vaddr & 0xFFF),
+        .pd = @intCast((vaddr >> 21) & 0x1FF),
+        .pt = @intCast((vaddr >> 12) & 0x1FF),
+        .off = @intCast(vaddr & 0xFFF),
     };
 }
 
@@ -87,7 +89,7 @@ pub const PagingContext = struct {
     /// Allocates one page for the PML4 from the physical page allocator.
     pub fn create() ?PagingContext {
         const raw = ppa.phys_alloc(1) orelse return null;
-        const table: *RawTable = @alignCast(@ptrCast(raw));
+        const table: *RawTable = @ptrCast(@alignCast(raw));
         table.* = RawTable.zeroed();
         return PagingContext{ .pml4 = table };
     }
@@ -97,9 +99,8 @@ pub const PagingContext = struct {
         const cr3_val = self.pml4.get_phys();
         asm volatile ("movq %[cr3], %%cr3"
             :
-            : [cr3] "r" (cr3_val)
-            : "memory"
-        );
+            : [cr3] "r" (cr3_val),
+            : .{ .memory = true });
     }
 
     /// Map `virtual_addr` → `physical_addr` with the given flags.
@@ -131,15 +132,15 @@ pub const PagingContext = struct {
 
         const pml4e = self.pml4.entries[va.pml4];
         if (pml4e & PF_PRESENT == 0) return;
-        const pdpt: *RawTable = @alignCast(@ptrFromInt(pml4e & PHYS_ADDR_MASK));
+        const pdpt: *RawTable = @ptrFromInt(pml4e & PHYS_ADDR_MASK);
 
         const pdpte = pdpt.entries[va.pdpt];
         if (pdpte & PF_PRESENT == 0) return;
-        const pd: *RawTable = @alignCast(@ptrFromInt(pdpte & PHYS_ADDR_MASK));
+        const pd: *RawTable = @ptrFromInt(pdpte & PHYS_ADDR_MASK);
 
         const pde = pd.entries[va.pd];
         if (pde & PF_PRESENT == 0) return;
-        const pt: *RawTable = @alignCast(@ptrFromInt(pde & PHYS_ADDR_MASK));
+        const pt: *RawTable = @ptrFromInt(pde & PHYS_ADDR_MASK);
 
         pt.entries[va.pt] = 0;
         invlpg(virtual_addr);
@@ -157,11 +158,11 @@ fn ensure_table(entry: *u64) !*RawTable {
     if (entry.* & PF_PRESENT != 0) {
         // Child table already exists — decode its address
         const addr = entry.* & PHYS_ADDR_MASK;
-        return @alignCast(@ptrFromInt(addr));
+        return @as(*RawTable, @ptrFromInt(addr));
     }
     // Allocate a new table page
     const raw = ppa.phys_alloc(1) orelse return error.OutOfMemory;
-    const table: *RawTable = @alignCast(@ptrCast(raw));
+    const table: *RawTable = @ptrCast(@alignCast(raw));
     table.* = RawTable.zeroed();
     entry.* = @intFromPtr(&table.entries) | PF_PRESENT | PF_WRITABLE | PF_USER;
     return table;
@@ -171,9 +172,8 @@ fn ensure_table(entry: *u64) !*RawTable {
 inline fn invlpg(vaddr: u64) void {
     asm volatile ("invlpg (%[addr])"
         :
-        : [addr] "r" (vaddr)
-        : "memory"
-    );
+        : [addr] "r" (vaddr),
+        : .{ .memory = true });
 }
 
 // ---------------------------------------------------------------------------
@@ -190,15 +190,50 @@ pub fn paging_global_init() void {
         vga.set_color(.LightRed, .Black);
         vga.print("[Paging] FATAL: cannot allocate PML4 — out of physical memory!\n");
         vga.set_color(.White, .Black);
-        while (true) { asm volatile ("hlt"); }
+        while (true) {
+            asm volatile ("hlt");
+        }
     };
+
+    // -----------------------------------------------------------------------
+    // Identity-map the first 2GB using 1GB huge pages.
+    // This mirrors the early boot page tables and ensures the kernel,
+    // VGA buffer (0xB8000), and physical allocator pool remain accessible
+    // after we switch to the new PML4.
+    //
+    // PDPT entry flags for 1GB huge page:
+    //   Bit 0 (P)   = Present
+    //   Bit 1 (R/W) = Writable
+    //   Bit 7 (PS)  = Page Size (1GB page)
+    // -----------------------------------------------------------------------
+    const huge_flags: u64 = 0x83; // Present | Writable | PageSize (1GB)
+
+    // Allocate a PDPT page for PML4 entry 0
+    const pdpt_raw = ppa.phys_alloc(1) orelse {
+        vga.set_color(.LightRed, .Black);
+        vga.print("[Paging] FATAL: cannot allocate PDPT!\n");
+        vga.set_color(.White, .Black);
+        while (true) {
+            asm volatile ("hlt");
+        }
+    };
+    const pdpt: *RawTable = @ptrCast(@alignCast(pdpt_raw));
+    pdpt.* = RawTable.zeroed();
+
+    // PDPT[0] = 0x00000000 | flags → identity-map 0GB–1GB
+    pdpt.entries[0] = huge_flags;
+    // PDPT[1] = 0x40000000 | flags → identity-map 1GB–2GB
+    pdpt.entries[1] = 0x40000000 | huge_flags;
+
+    // PML4[0] = &PDPT | Present | Writable
+    kernel_paging.?.pml4.entries[0] = @intFromPtr(&pdpt.entries) | PF_PRESENT | PF_WRITABLE;
 
     // Activate the new kernel page table
     kernel_paging.?.activate();
     paging_initialized = true;
 
     vga.set_color(.Green, .Black);
-    vga.print("[Paging] Kernel PML4 loaded into CR3 — 4-level paging active.\n");
+    vga.print("[Paging] Kernel PML4 loaded into CR3 — identity-mapped first 2GB.\n");
     vga.set_color(.White, .Black);
 }
 

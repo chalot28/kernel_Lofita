@@ -219,7 +219,7 @@ pub fn set_cursor(col: usize, row: usize) void {
 
 /// Print a byte slice to the VGA buffer.
 /// Called from Rust via: extern "C" fn vga_print_bytes(ptr: *const u8, len: usize)
-pub export fn vga_print_bytes(ptr: [*]const u8, len: usize) callconv(.C) void {
+pub export fn vga_print_bytes(ptr: [*]const u8, len: usize) callconv(.c) void {
     var i: usize = 0;
     while (i < len) : (i += 1) {
         put_char(ptr[i]);

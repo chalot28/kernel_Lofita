@@ -13,7 +13,7 @@
 //   0x28 — TSS low  (16-byte descriptor — for future Task State Segment)
 //   0x30 — TSS high
 
-const vga = @import("../../drivers/vga.zig");
+const vga = @import("../../../drivers/vga.zig");
 
 // ---------------------------------------------------------------------------
 // Data structures (packed for correct binary layout)
@@ -105,7 +105,7 @@ pub fn gdt_init() void {
     asm volatile ("lgdt (%[ptr])"
         :
         : [ptr] "r" (&gdt_ptr)
-        : "memory"
+        : .{ .memory = true }
     );
 
     // --- Reload segment registers ---
@@ -117,7 +117,7 @@ pub fn gdt_init() void {
         \\ push $0x08
         \\ lea  1f(%rip), %rax
         \\ push %rax
-        \\ retfq
+        \\ lretq
         \\ 1:
         \\ /* Reload data segment registers */
         \\ mov $0x10, %ax
@@ -128,7 +128,7 @@ pub fn gdt_init() void {
         \\ mov %ax, %ss
         :
         :
-        : "rax", "memory"
+        : .{ .rax = true, .memory = true }
     );
 
     vga.set_color(.Green, .Black);

@@ -28,6 +28,9 @@
 //   u32 header_length = size of the whole header
 //   u32 checksum     = -(magic + arch + header_length)
 // followed by tag structures terminated by an end tag.
+//
+// NOTE: No framebuffer tag is included — we omit it so GRUB stays in
+// legacy VGA text mode and the VGA buffer at 0xB8000 works.
 
 comptime {
     // Force this section to be included in the output even if unreferenced.
@@ -48,15 +51,6 @@ comptime {
         \\   .short 0                  /* flags */
         \\   .long  12                 /* size */
         \\   .long  6                  /* MBI type 6 = memory map */
-        \\
-        \\   /* --- Framebuffer tag (type=5): request text mode 80x25 --- */
-        \\   .align 8
-        \\   .short 5                  /* tag type: framebuffer */
-        \\   .short 0                  /* flags */
-        \\   .long  20                 /* size */
-        \\   .long  0                  /* width  = 0 (no preference) */
-        \\   .long  0                  /* height = 0 (no preference) */
-        \\   .long  0                  /* depth  = 0 = text mode */
         \\
         \\   /* --- End tag --- */
         \\   .align 8
@@ -87,12 +81,18 @@ comptime {
         \\   cli
         \\   cld
         \\
-        \\   /* Save multiboot2 info ptr (EBX) and magic (EAX) */
-        \\   mov %ebx, (mb2_info_ptr)
-        \\   mov %eax, (mb2_magic)
+        \\   /* DEBUG: write white 'L' to VGA from 32-bit mode via register */
+        \\   mov $0xB8000, %edi
+        \\   movw $0x0F4C, (%edi)
+        \\
+        \\   /* Save multiboot2 info ptr (EBX) and magic (EAX) via register */
+        \\   mov $mb2_info_ptr, %edi
+        \\   mov %ebx, (%edi)
+        \\   mov $mb2_magic, %edi
+        \\   mov %eax, (%edi)
         \\
         \\   /* Set up temporary 32-bit stack (grows down from label) */
-        \\   mov $(_boot_stack_top), %esp
+        \\   mov $_boot_stack_top, %esp
         \\
         \\   /* ---------------------------------------------------------------- */
         \\   /* Enable SSE so Zig can use XMM registers                         */
@@ -107,39 +107,30 @@ comptime {
         \\
         \\   /* ---------------------------------------------------------------- */
         \\   /* Build identity-mapped page tables for the first 2 GB            */
-        \\   /* PML4[0] -> PDPT[0] -> PD[0..3] using 2MB huge pages            */
         \\   /* ---------------------------------------------------------------- */
         \\   /* Zero out page table area (3 * 4096 bytes) */
-        \\   mov $(_pml4), %edi
+        \\   mov $_pml4, %edi
         \\   xor %eax, %eax
         \\   mov $3072, %ecx          /* 3 pages * 1024 dwords */
         \\   rep stosl
         \\
         \\   /* PML4[0] = &PDPT | PRESENT | WRITABLE */
-        \\   mov $(_pml4),  %edi
-        \\   mov $(_pdpt),  %eax
+        \\   mov $_pml4,  %edi
+        \\   mov $_pdpt,  %eax
         \\   or  $0x3, %eax
         \\   mov %eax, (%edi)
         \\
-        \\   /* PDPT[0] = &PD | PRESENT | WRITABLE */
-        \\   mov $(_pdpt), %edi
-        \\   mov $(_pd),   %eax
-        \\   or  $0x3, %eax
-        \\   mov %eax, (%edi)
-        \\
-        \\   /* PD[0..3]: 4 entries each covering 2MB = first 8MB identity-mapped */
-        \\   /* Also map first 2GB via 1GB huge pages in PDPT[0..1]               */
-        \\   /* Use 1GB PDPT entries (PS bit) for simplicity */
-        \\   mov $(_pdpt), %edi
+        \\   /* Map first 2GB via 1GB huge pages in PDPT */
+        \\   mov $_pdpt, %edi
         \\   /* PDPT[0] = 0x00000000 | PRESENT | WRITABLE | HUGE (1GB page) */
-        \\   mov $0x83, %eax          /* 0 | Present | Writable | PageSize */
+        \\   mov $0x83, %eax          /* physical 0 | Present | Writable | PageSize */
         \\   mov %eax, (%edi)
         \\   /* PDPT[1] = 0x40000000 | PRESENT | WRITABLE | HUGE (1GB page) */
         \\   mov $0x40000083, %eax
         \\   mov %eax, 8(%edi)
         \\
         \\   /* Load PML4 into CR3 */
-        \\   mov $(_pml4), %eax
+        \\   mov $_pml4, %eax
         \\   mov %eax, %cr3
         \\
         \\   /* ---------------------------------------------------------------- */
@@ -167,7 +158,8 @@ comptime {
         \\   /* ---------------------------------------------------------------- */
         \\   /* Load a minimal 64-bit GDT and far-jump to 64-bit segment         */
         \\   /* ---------------------------------------------------------------- */
-        \\   lgdt (_gdt64_ptr)
+        \\   mov $_gdt64_ptr, %edi
+        \\   lgdt (%edi)
         \\   /* Far jump: segment 0x08 (64-bit code descriptor) : _start64 */
         \\   ljmp $0x08, $_start64
         \\
@@ -180,6 +172,9 @@ comptime {
         \\   mov %ax, %fs
         \\   mov %ax, %gs
         \\   mov %ax, %ss
+        \\
+        \\   /* DEBUG: write a green 'L' to VGA at 0xB8000 */
+        \\   movw $0x024C, (0xB8000)   /* 0x024C = 'L' (0x4C) | attr green(0x02) << 8 */
         \\
         \\   /* Zero BSS segment */
         \\   mov $(_bss_start), %rdi
@@ -230,8 +225,9 @@ comptime {
         \\
         \\ /* ---------------------------------------------------------------- */
         \\ /* Early boot page tables (3 pages, 4KB-aligned)                   */
+        \\ /* Placed in .data (NOT .bss!) so BSS zeroing doesn't wipe them.   */
         \\ /* ---------------------------------------------------------------- */
-        \\ .section .bss
+        \\ .section .data
         \\ .align 4096
         \\ _pml4: .skip 4096
         \\ _pdpt: .skip 4096

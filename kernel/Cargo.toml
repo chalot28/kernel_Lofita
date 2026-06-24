@@ -28,13 +28,13 @@ panic = "abort"
 bitflags = { version = "2.4", default-features = false }
 
 # Spinlock-based Mutex/RwLock that works without OS (replaces std::sync::Mutex)
-spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock", "once"] }
+spin = { version = "0.9", default-features = false, features = ["spin_mutex", "rwlock", "once"] }
 
 # HashMap/HashSet backed by AHash (no_std, no global allocator for the hasher)
 hashbrown = { version = "0.14", default-features = false, features = ["ahash"] }
 
 # Heap allocator for bare-metal (provides GlobalAlloc impl over a static byte array)
-linked-list-allocator = { version = "0.10", default-features = false, features = ["const_mut_refs"] }
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
 
 # Safer integer handling (no_std)
 # (used for formatted output without std's fmt machinery)

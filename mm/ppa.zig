@@ -41,7 +41,7 @@ var mem_pool: [MEMORY_SIZE]u8 align(PAGE_SIZE) = undefined;
 // ---------------------------------------------------------------------------
 
 const PageInfo = struct {
-    order:   u8,
+    order:   u6,
     is_free: bool,
 };
 
@@ -101,7 +101,7 @@ pub fn ppa_init() void {
 // Allocator — buddy split
 // ---------------------------------------------------------------------------
 
-pub export fn phys_alloc(pages: usize) callconv(.C) ?[*]u8 {
+pub export fn phys_alloc(pages: usize) callconv(.c) ?[*]u8 {
     if (!initialized) ppa_init();
     if (pages == 0) return null;
 
@@ -109,7 +109,7 @@ pub export fn phys_alloc(pages: usize) callconv(.C) ?[*]u8 {
     defer unlock();
 
     // Find the smallest order that fits 'pages' pages
-    var req_order: u8 = 0;
+    var req_order: u6 = 0;
     while ((@as(usize, 1) << req_order) < pages) {
         req_order += 1;
         if (req_order >= MAX_ORDER) return null;
@@ -144,7 +144,7 @@ pub export fn phys_alloc(pages: usize) callconv(.C) ?[*]u8 {
 // Deallocator — buddy coalesce
 // ---------------------------------------------------------------------------
 
-pub export fn phys_free(ptr: ?[*]u8, _pages: usize) callconv(.C) void {
+pub export fn phys_free(ptr: ?[*]u8, _pages: usize) callconv(.c) void {
     _ = _pages; // Ignored — we recover size from page_meta
 
     if (!initialized or ptr == null) return;

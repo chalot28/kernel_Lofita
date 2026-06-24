@@ -6,7 +6,6 @@
 //  FREESTANDING CONFIGURATION
 // ═══════════════════════════════════════════════════════════
 #![no_std]
-#![no_main]
 
 // Allow heap-allocated types (Vec, String, Box, Arc) through alloc crate.
 // The actual heap is backed by our linked_list_allocator below.
@@ -26,7 +25,7 @@ pub mod driver;
 use alloc::sync::Arc;
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use alloc::mem;
+use core::mem;
 use spin::Mutex;
 use hashbrown::HashMap;
 
@@ -55,8 +54,8 @@ static mut HEAP_MEM: [u8; 4 * 1024 * 1024] = [0u8; 4 * 1024 * 1024];
 /// Must be called ONCE before any heap allocation.
 /// Called from rust_kernel_init() as the very first step.
 unsafe fn heap_init() {
-    let heap_start = HEAP_MEM.as_mut_ptr();
-    let heap_size  = HEAP_MEM.len();
+    let heap_start = core::ptr::addr_of_mut!(HEAP_MEM) as *mut u8;
+    let heap_size  = 4 * 1024 * 1024;
     ALLOCATOR.lock().init(heap_start, heap_size);
 }
 
@@ -199,7 +198,9 @@ pub extern "C" fn rust_kernel_init() {
         is_deprecated: false,
     }));
 
-    state.tokens.insert(state.next_token_id, root_token);
+    // Extract ID before the mutable insert to satisfy the borrow checker
+    let root_id = state.next_token_id;
+    state.tokens.insert(root_id, root_token);
     state.next_token_id += 1;
     kprint!("[kernel/rust] Root Token initialized.\n");
 
@@ -327,7 +328,7 @@ fn get_aslr_offset(seed: usize) -> usize {
     let c: usize = 12_345;
     let m: usize = 1 << 31;
     let rand = (a.wrapping_mul(seed).wrapping_add(c)) % m;
-    ((rand % 1024) * 4096) // Page-aligned, max 4MB
+    (rand % 1024) * 4096 // Page-aligned, max 4MB
 }
 
 #[no_mangle]
@@ -337,7 +338,7 @@ pub extern "C" fn rust_allocate_memory(
     is_writeable:  bool,
     is_executable: bool,
 ) -> usize {
-    let mut state = kernel().lock();
+    let state = kernel().lock();
     let token_arc = match state.tokens.get(&token_id) {
         Some(arc) => Arc::clone(arc),
         None => return 0,
@@ -486,10 +487,13 @@ pub extern "C" fn rust_vfs_write(
         return -14;
     }
 
-    let data      = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
+    let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
     let mut state = kernel().lock();
-    let dm        = &state.driver;
-    match state.vfs.write(session_id, fd, data, dm) {
+    // Split the borrow: get a raw pointer to driver so we can also borrow vfs mutably.
+    // Safety: driver is never mutated during vfs.write(), both fields are disjoint.
+    let dm_ptr: *const driver::DriverManager = &state.driver;
+    let result = state.vfs.write(session_id, fd, data, unsafe { &*dm_ptr });
+    match result {
         Ok(n)  => n as i32,
         Err(_) => -1,
     }
@@ -575,7 +579,7 @@ pub extern "C" fn rust_kernel_tick() {
 /// Entry point for Linux-compat syscall routing (called from IDT int 0x80 handler).
 #[no_mangle]
 pub extern "C" fn rust_syscall_dispatch(
-    nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, _a6: u64,
+    nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, _a5: u64, _a6: u64,
 ) -> i64 {
     match nr {
         // sys_read

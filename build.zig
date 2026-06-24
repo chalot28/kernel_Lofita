@@ -16,9 +16,6 @@ pub fn build(b: *std.Build) void {
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
-        // Disable "red zone" — an x86-64 ABI optimization that causes crashes
-        // in kernel interrupt handlers which share the stack with userspace.
-        .cpu_features_sub = std.Target.x86.featureSet(&.{.red_zone}),
     });
 
     const optimize = b.standardOptimizeOption(.{});
@@ -26,27 +23,26 @@ pub fn build(b: *std.Build) void {
     // -----------------------------------------------------------------------
     // Kernel executable (ELF)
     // -----------------------------------------------------------------------
-    const kernel = b.addExecutable(.{
-        .name = "lorifa_kernel",
-        .root_source_file = b.path("init/main.zig"),
+    const kernel_mod = b.createModule(.{
+        .root_source_file = b.path("main.zig"),
         .target = target,
         .optimize = optimize,
-        // Disable the Zig standard library (uses OS syscalls we don't have).
-        // Our code uses `@import("std")` only for comptime utilities like
-        // std.Build — the kernel sources themselves must NOT import std.
         .strip = false,
     });
+    kernel_mod.red_zone = false;
 
-    // Freestanding kernel must NOT link libc or any host runtime
-    kernel.want_lto = false;
+    const kernel = b.addExecutable(.{
+        .name = "lorifa_kernel",
+        .root_module = kernel_mod,
+    });
 
     // Use our custom linker script to place the kernel at 0x100000
     kernel.setLinkerScript(b.path("kernel.ld"));
 
     // Link the Rust core static library (must be compiled separately with
     // `cargo build --target x86_64-unknown-none --release` inside kernel/)
-    kernel.addLibraryPath(b.path("kernel/target/x86_64-unknown-none/release"));
-    kernel.linkSystemLibrary("lorifa_kernel_core");
+    kernel_mod.addLibraryPath(b.path("kernel/target/x86_64-unknown-none/release"));
+    kernel_mod.linkSystemLibrary("lorifa_kernel_core", .{});
 
     // Install the ELF into zig-out/bin/
     b.installArtifact(kernel);
