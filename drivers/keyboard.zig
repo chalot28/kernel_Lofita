@@ -1,5 +1,6 @@
 const vga = @import("vga.zig");
 const pic = @import("pic.zig");
+const io = @import("../arch/x86_64/io.zig");
 
 const RING_BUF_SIZE = 256;
 var ring_buf: [RING_BUF_SIZE]u8 = undefined;
@@ -7,40 +8,29 @@ var ring_head: usize = 0;
 var ring_tail: usize = 0;
 
 fn ring_put(c: u8) void {
-    const next = (ring_head + 1) % RING_BUF_SIZE;
-    if (next != ring_tail) {
-        ring_buf[ring_head] = c;
-        ring_head = next;
+    const head = @atomicLoad(usize, &ring_head, .seq_cst);
+    const tail = @atomicLoad(usize, &ring_tail, .seq_cst);
+    const next = (head + 1) % RING_BUF_SIZE;
+    if (next != tail) {
+        @as(*volatile u8, &ring_buf[head]).* = c;
+        @atomicStore(usize, &ring_head, next, .seq_cst);
     }
 }
 
 pub fn read_key() ?u8 {
-    if (ring_head == ring_tail) return null;
-    const c = ring_buf[ring_tail];
-    ring_tail = (ring_tail + 1) % RING_BUF_SIZE;
+    const head = @atomicLoad(usize, &ring_head, .seq_cst);
+    const tail = @atomicLoad(usize, &ring_tail, .seq_cst);
+    if (head == tail) return null;
+    const c = @as(*volatile u8, &ring_buf[tail]).*;
+    @atomicStore(usize, &ring_tail, (tail + 1) % RING_BUF_SIZE, .seq_cst);
     return c;
 }
 
-fn outb(port: u16, val: u8) void {
-    asm volatile ("outb %[val], %[port]"
-        :
-        : [val] "{al}" (val),
-          [port] "{dx}" (port),
-    );
-}
-
-fn inb(port: u16) u8 {
-    return asm volatile ("inb %[port], %[result]"
-        : [result] "={al}" (-> u8),
-        : [port] "{dx}" (port),
-    );
-}
-
 fn wait_write() void {
-    while (inb(0x64) & 0x02 != 0) {}
+    while (io.inb(0x64) & 0x02 != 0) {}
 }
 fn wait_read() void {
-    while (inb(0x64) & 0x01 == 0) {}
+    while (io.inb(0x64) & 0x01 == 0) {}
 }
 
 const SCANCODE_NORMAL: [128]u8 = blk: {
@@ -167,8 +157,22 @@ const SCANCODE_LCTRL = 0x1D;
 const SCANCODE_LALT = 0x38;
 const SCANCODE_CAPSLOCK = 0x3A;
 
+var debug_kb_count: u8 = 0;
+
 pub fn handle_keyboard_interrupt() callconv(.c) void {
-    const scancode = inb(0x60);
+    // DEBUG: show rotating spinner + raw scancode at top-right
+    debug_kb_count +%= 1;
+    const spinner = "|/-\\";
+    const vga_buf: [*]volatile u16 = @ptrFromInt(0xB8000);
+    vga_buf[79] = @as(u16, spinner[debug_kb_count % 4]) | (@as(u16, 0x0E00));
+
+    const scancode = io.inb(0x60);
+    // DEBUG: write scancode hex at column 70-78
+    const hex = "0123456789ABCDEF";
+    vga_buf[70] = @as(u16, 'S') | (@as(u16, 0x0C00));
+    vga_buf[71] = @as(u16, ':') | (@as(u16, 0x0C00));
+    vga_buf[72] = @as(u16, hex[(scancode >> 4) & 0xF]) | (@as(u16, 0x0C00));
+    vga_buf[73] = @as(u16, hex[scancode & 0xF]) | (@as(u16, 0x0C00));
     if (scancode == 0xE0) {
         pic.eoi_master();
         return;
@@ -195,9 +199,9 @@ pub fn handle_keyboard_interrupt() callconv(.c) void {
     if (code == SCANCODE_CAPSLOCK and !is_release) {
         caps_lock = !caps_lock;
         wait_write();
-        outb(0x64, 0xED);
+        io.outb(0x64, 0xED);
         wait_write();
-        outb(0x60, if (caps_lock) @as(u8, 4) else 0);
+        io.outb(0x60, if (caps_lock) @as(u8, 4) else 0);
         pic.eoi_master();
         return;
     }
@@ -218,19 +222,19 @@ pub fn keyboard_init() void {
     ctrl_pressed = false;
     alt_pressed = false;
     caps_lock = false;
-    ring_head = 0;
-    ring_tail = 0;
+    @atomicStore(usize, &ring_head, 0, .seq_cst);
+    @atomicStore(usize, &ring_tail, 0, .seq_cst);
 
     wait_write();
-    outb(0x64, 0xAE);
+    io.outb(0x64, 0xAE);
     wait_write();
-    outb(0x64, 0x20);
+    io.outb(0x64, 0x20);
     wait_read();
-    const cmd_byte = inb(0x60);
+    const cmd_byte = io.inb(0x60);
     wait_write();
-    outb(0x64, 0x60);
+    io.outb(0x64, 0x60);
     wait_write();
-    outb(0x60, cmd_byte | 0x01);
+    io.outb(0x60, cmd_byte | 0x01);
 
     pic.set_master_mask(0xFD);
     pic.set_slave_mask(0xFF);

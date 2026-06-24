@@ -1,5 +1,5 @@
-// kernel/shell.zig — Lofita OS Interactive Terminal Shell
-// Written in Zig (freestanding — no std, no libc)
+// kernel/shell.zig - Lofita OS Interactive Terminal Shell
+// Written in Zig (freestanding - no std, no libc)
 //
 // A simple command-line shell that reads keyboard input and
 // displays output via the VGA text-mode driver.
@@ -136,7 +136,7 @@ pub fn shell_main() noreturn {
     vga.set_color(.LightGreen, .Black);
     vga.print("\n");
     vga.print("==================================================\n");
-    vga.print("      Lofita Kernel — Interactive Terminal        \n");
+    vga.print("      Lofita Kernel - Interactive Terminal        \n");
     vga.print("      Type 'help' for available commands          \n");
     vga.print("==================================================\n");
     vga.set_color(.White, .Black);
@@ -179,8 +179,8 @@ pub fn shell_main() noreturn {
                 },
             }
         } else {
-            // No key available — brief pause to avoid busy-waiting too hard
-            asm volatile ("pause");
+            // No key available - halt the CPU until next interrupt to save CPU cycles
+            asm volatile ("hlt");
         }
     }
 }

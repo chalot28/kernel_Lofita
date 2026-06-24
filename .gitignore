@@ -8,6 +8,7 @@ Cargo.lock
 
 # Zig build outputs and cache
 zig-cache/
+.zig-cache/
 zig-out/
 *.o
 *.a

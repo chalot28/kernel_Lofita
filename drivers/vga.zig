@@ -1,4 +1,4 @@
-// drivers/vga.zig — Lofita OS VGA Text Mode Driver
+// drivers/vga.zig - Lofita OS VGA Text Mode Driver
 // Written in Zig (freestanding, no std)
 //
 // Drives the VGA text buffer at physical address 0xB8000.
@@ -10,6 +10,8 @@
 //   0=Black 1=Blue 2=Green 3=Cyan 4=Red 5=Magenta 6=Brown 7=LightGrey
 //   8=DarkGrey 9=LightBlue A=LightGreen B=LightCyan C=LightRed
 //   D=LightMagenta E=Yellow F=White
+
+const io = @import("../arch/x86_64/io.zig");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -58,6 +60,14 @@ inline fn vga_ptr() [*]volatile u16 {
     return @ptrFromInt(VGA_BASE);
 }
 
+fn update_cursor(col: usize, row: usize) void {
+    const pos = @as(u16, @intCast(row * VGA_WIDTH + col));
+    io.outb(0x3D4, 0x0F);
+    io.outb(0x3D5, @as(u8, @intCast(pos & 0xFF)));
+    io.outb(0x3D4, 0x0E);
+    io.outb(0x3D5, @as(u8, @intCast((pos >> 8) & 0xFF)));
+}
+
 /// Write a single character cell at (col, row) with the given attribute byte.
 pub fn put_char_at(col: usize, row: usize, char: u8, attr: u8) void {
     const index = row * VGA_WIDTH + col;
@@ -80,6 +90,7 @@ pub fn clear() void {
     }
     cursor_col = 0;
     cursor_row = 0;
+    update_cursor(cursor_col, cursor_row);
 }
 
 /// Scroll the screen up by one line, clearing the bottom row.
@@ -100,6 +111,7 @@ fn scroll() void {
         put_char_at(c, VGA_HEIGHT - 1, ' ', default_attr);
     }
     if (cursor_row > 0) cursor_row -= 1;
+    update_cursor(cursor_col, cursor_row);
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +161,8 @@ pub fn put_char(char: u8) void {
     if (cursor_row >= VGA_HEIGHT) {
         scroll();
     }
+
+    update_cursor(cursor_col, cursor_row);
 }
 
 /// Print a slice of bytes to the VGA buffer.
@@ -211,6 +225,7 @@ pub fn set_color(fg: Color, bg: Color) void {
 pub fn set_cursor(col: usize, row: usize) void {
     cursor_col = if (col < VGA_WIDTH) col else VGA_WIDTH - 1;
     cursor_row = if (row < VGA_HEIGHT) row else VGA_HEIGHT - 1;
+    update_cursor(cursor_col, cursor_row);
 }
 
 // ---------------------------------------------------------------------------

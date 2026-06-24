@@ -1,4 +1,5 @@
 const vga = @import("vga.zig");
+const io = @import("../arch/x86_64/io.zig");
 
 pub const IRQ0_VECTOR: u8 = 0x20;
 pub const IRQ1_VECTOR: u8 = 0x21;
@@ -14,47 +15,30 @@ pub const IRQ13_VECTOR: u8 = 0x2D;
 pub const IRQ14_VECTOR: u8 = 0x2E;
 pub const IRQ15_VECTOR: u8 = 0x2F;
 
-fn outb(port: u16, val: u8) void {
-    asm volatile ("outb %[val], %[port]"
-        :
-        : [val] "{al}" (val),
-          [port] "{dx}" (port),
-    );
-}
-
-fn inb(port: u16) u8 {
-    return asm volatile ("inb %[port], %[result]"
-        : [result] "={al}" (-> u8),
-        : [port] "{dx}" (port),
-    );
-}
-
-fn io_wait() void {
-    outb(0x80, 0);
-}
+// Remove local outb, inb, io_wait
 
 pub fn pic_init() void {
-    const mask1 = inb(0x21);
-    const mask2 = inb(0xA1);
+    const mask1 = io.inb(0x21);
+    const mask2 = io.inb(0xA1);
 
-    outb(0x20, 0x11);
-    io_wait();
-    outb(0xA0, 0x11);
-    io_wait();
-    outb(0x21, 0x20);
-    io_wait();
-    outb(0xA1, 0x28);
-    io_wait();
-    outb(0x21, 0x04);
-    io_wait();
-    outb(0xA1, 0x02);
-    io_wait();
-    outb(0x21, 0x01);
-    io_wait();
-    outb(0xA1, 0x01);
-    io_wait();
-    outb(0x21, mask1);
-    outb(0xA1, mask2);
+    io.outb(0x20, 0x11);
+    io.io_wait();
+    io.outb(0xA0, 0x11);
+    io.io_wait();
+    io.outb(0x21, 0x20);
+    io.io_wait();
+    io.outb(0xA1, 0x28);
+    io.io_wait();
+    io.outb(0x21, 0x04);
+    io.io_wait();
+    io.outb(0xA1, 0x02);
+    io.io_wait();
+    io.outb(0x21, 0x01);
+    io.io_wait();
+    io.outb(0xA1, 0x01);
+    io.io_wait();
+    io.outb(0x21, mask1);
+    io.outb(0xA1, mask2);
 
     vga.set_color(.Green, .Black);
     vga.print("[PIC] 8259A initialized -- IRQs remapped.\n");
@@ -62,15 +46,15 @@ pub fn pic_init() void {
 }
 
 pub fn set_master_mask(mask: u8) void {
-    outb(0x21, mask);
+    io.outb(0x21, mask);
 }
 pub fn set_slave_mask(mask: u8) void {
-    outb(0xA1, mask);
+    io.outb(0xA1, mask);
 }
 pub fn eoi_master() void {
-    outb(0x20, 0x20);
+    io.outb(0x20, 0x20);
 }
 pub fn eoi_slave() void {
-    outb(0xA0, 0x20);
-    outb(0x20, 0x20);
+    io.outb(0xA0, 0x20);
+    io.outb(0x20, 0x20);
 }
