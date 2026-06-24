@@ -12,6 +12,10 @@ use fs::FsSyscalls;
 use net::NetSyscalls;
 use process::ProcessSyscalls;
 
+extern "C" {
+    fn rust_check_capability(session_id: u64, cap_val: u32) -> bool;
+}
+
 pub struct SyscallRouter {
     pub memory: MemorySyscalls,
 }
@@ -40,6 +44,11 @@ impl SyscallRouter {
                 // sys_open(path_ptr, path_len, flags)
                 let path_ptr = args[0] as *const u8;
                 let path_len = args[1] as usize;
+                
+                if path_ptr.is_null() || args[0] < 0x20000000 {
+                    return -14; // -EFAULT
+                }
+
                 let is_write = args[2] != 0;
                 let path_slice = unsafe { std::slice::from_raw_parts(path_ptr, path_len) };
                 let path = std::str::from_utf8(path_slice).unwrap_or("unknown");
@@ -59,7 +68,8 @@ impl SyscallRouter {
             }
             41 => {
                 // sys_socket
-                NetSyscalls::sys_socket(process_id, true)
+                let has_net = unsafe { rust_check_capability(session_id, 1 << 4) }; // Capability::NET_CONNECT = 1 << 4
+                NetSyscalls::sys_socket(process_id, has_net)
             }
             60 => {
                 // sys_exit

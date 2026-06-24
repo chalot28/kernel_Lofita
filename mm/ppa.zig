@@ -18,8 +18,24 @@ const PageInfo = struct {
 
 var page_table: [TOTAL_PAGES]PageInfo = undefined;
 var initialized: bool = false;
+var ppa_lock: bool = false; // Simple spinlock
+
+fn lock() void {
+    while (@atomicRmw(bool, &ppa_lock, .Xchg, true, .acquire)) {
+        // spin
+    }
+}
+
+fn unlock() void {
+    @atomicStore(bool, &ppa_lock, false, .release);
+}
 
 pub fn ppa_init() void {
+    if (initialized) return;
+    lock();
+    defer unlock();
+    
+    // Check again inside lock
     if (initialized) return;
 
     var i: usize = 0;
@@ -40,6 +56,9 @@ pub fn ppa_init() void {
 pub export fn phys_alloc(pages: usize) callconv(.C) ?[*]u8 {
     if (!initialized) ppa_init();
     if (pages == 0) return null;
+
+    lock();
+    defer unlock();
 
     var req_order: u8 = 0;
     while ((@as(usize, 1) << req_order) < pages) {
@@ -69,7 +88,9 @@ pub export fn phys_alloc(pages: usize) callconv(.C) ?[*]u8 {
     return null;
 }
 
-pub export fn phys_free(ptr: ?[*]u8, pages: usize) callconv(.C) void {
+pub export fn phys_free(ptr: ?[*]u8, _pages: usize) callconv(.C) void {
+    _ = _pages; // Ignore supplied pages argument to prevent arbitrary free.
+
     if (!initialized or ptr == null) return;
     const addr = @intFromPtr(ptr);
     const pool_addr = @intFromPtr(&mem_pool);
@@ -81,10 +102,15 @@ pub export fn phys_free(ptr: ?[*]u8, pages: usize) callconv(.C) void {
     const start_page = offset / PAGE_SIZE;
     if (start_page >= TOTAL_PAGES) return;
 
-    var req_order: u8 = 0;
-    while ((@as(usize, 1) << req_order) < pages) {
-        req_order += 1;
+    lock();
+    defer unlock();
+
+    if (page_table[start_page].is_free) {
+        // Double free detected
+        return;
     }
+
+    const req_order = page_table[start_page].order;
 
     var current_order = req_order;
     var page_idx = start_page;

@@ -123,6 +123,22 @@ pub extern "C" fn rust_create_child_token(
     let cap = Capability::from_bits_truncate(cap_flags);
     let mut state = KERNEL.lock().unwrap();
 
+    if let Some(parent_arc) = state.tokens.get(&parent_id) {
+        let parent_token = parent_arc.lock().unwrap();
+        
+        // Enforce privilege level: Parent's privilege must be higher or equal to child (lower numeric value = higher privilege)
+        if (parent_token.privilege as u32) > privilege_val {
+            println!("[Security Guard] Creator authority bypass attempt: Insufficient privilege to spawn child token.");
+            return 0;
+        }
+
+        // Enforce capabilities subset: Child cannot have capabilities parent doesn't have
+        if (parent_token.capabilities.bits() & cap_flags) != cap_flags {
+            println!("[Security Guard] Creator authority bypass attempt: Child token requested capabilities not possessed by parent.");
+            return 0;
+        }
+    }
+
     let parent_weak = state.tokens.get(&parent_id).map(|arc| Arc::downgrade(arc));
     let token_id = state.next_token_id;
     
@@ -264,6 +280,16 @@ pub extern "C" fn rust_vfs_open(session_id: u64, path_ptr: *const u8, path_len: 
     let path = std::str::from_utf8(path_slice).unwrap_or("unknown");
     let is_write = write_val != 0;
 
+    let required_cap = if is_write {
+        Capability::FS_WRITE.bits()
+    } else {
+        Capability::FS_READ.bits()
+    };
+
+    if !rust_check_capability(session_id, required_cap) {
+        return 0; // Or return a specific error code
+    }
+
     let mut state = KERNEL.lock().unwrap();
     match state.vfs.open(session_id, path, is_write) {
         Ok(fd) => fd,
@@ -287,6 +313,14 @@ pub extern "C" fn rust_vfs_read(
     buf_ptr: *mut u8,
     buf_len: usize,
 ) -> i32 {
+    if !rust_check_capability(session_id, Capability::FS_READ.bits()) {
+        return -13; // EACCES
+    }
+
+    if buf_ptr.is_null() || (buf_ptr as usize) < 0x20000000 {
+        return -14; // EFAULT
+    }
+
     let state = KERNEL.lock().unwrap();
     let dm = &state.driver;
     match state.vfs.read(session_id, fd, buf_len, dm) {
@@ -308,6 +342,14 @@ pub extern "C" fn rust_vfs_write(
     data_ptr: *const u8,
     data_len: usize,
 ) -> i32 {
+    if !rust_check_capability(session_id, Capability::FS_WRITE.bits()) {
+        return -13; // EACCES
+    }
+
+    if data_ptr.is_null() || (data_ptr as usize) < 0x20000000 {
+        return -14; // EFAULT
+    }
+
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
     let mut state = KERNEL.lock().unwrap();
     let dm = &state.driver;
