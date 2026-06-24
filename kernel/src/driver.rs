@@ -27,9 +27,9 @@ use crate::kprint;
 // ---------------------------------------------------------------------------
 
 pub trait CharDriver: Send + Sync {
-    fn open(&self)                     -> Result<(), &'static str>;
-    fn read(&self, size: usize)        -> Vec<u8>;
-    fn write(&self, data: &[u8])       -> usize;
+    fn open(&self)                                  -> Result<(), &'static str>;
+    fn read(&self, offset: usize, size: usize)      -> Vec<u8>;
+    fn write(&self, offset: usize, data: &[u8])     -> usize;
 }
 
 // ---------------------------------------------------------------------------
@@ -40,8 +40,8 @@ pub struct NullDriver;
 
 impl CharDriver for NullDriver {
     fn open(&self) -> Result<(), &'static str> { Ok(()) }
-    fn read(&self, _size: usize) -> Vec<u8> { Vec::new() }    // EOF
-    fn write(&self, data: &[u8]) -> usize { data.len() }       // Discard
+    fn read(&self, _offset: usize, _size: usize) -> Vec<u8> { Vec::new() }    // EOF
+    fn write(&self, _offset: usize, data: &[u8]) -> usize { data.len() }       // Discard
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +53,7 @@ pub struct UrandomDriver;
 impl CharDriver for UrandomDriver {
     fn open(&self) -> Result<(), &'static str> { Ok(()) }
 
-    fn read(&self, size: usize) -> Vec<u8> {
+    fn read(&self, _offset: usize, size: usize) -> Vec<u8> {
         // LCG-based PRNG seeded with size (no entropy on bare metal yet)
         let mut bytes = Vec::with_capacity(size);
         let mut state: u64 = size as u64 ^ 0xDEADBEEF_CAFEBABE;
@@ -65,7 +65,7 @@ impl CharDriver for UrandomDriver {
         bytes
     }
 
-    fn write(&self, data: &[u8]) -> usize { data.len() } // Discard writes
+    fn write(&self, _offset: usize, data: &[u8]) -> usize { data.len() } // Discard writes
 }
 
 // ---------------------------------------------------------------------------
@@ -79,18 +79,72 @@ pub struct Fb0Driver {
 impl CharDriver for Fb0Driver {
     fn open(&self) -> Result<(), &'static str> { Ok(()) }
 
-    fn read(&self, size: usize) -> Vec<u8> {
+    fn read(&self, offset: usize, size: usize) -> Vec<u8> {
         let buf   = self.buffer.lock();
-        let limit = core::cmp::min(size, buf.len());
-        buf[0..limit].to_vec()
+        if offset >= buf.len() { return Vec::new(); }
+        let limit = core::cmp::min(offset + size, buf.len());
+        buf[offset..limit].to_vec()
     }
 
-    fn write(&self, data: &[u8]) -> usize {
+    fn write(&self, offset: usize, data: &[u8]) -> usize {
         let mut buf   = self.buffer.lock();
-        let limit = core::cmp::min(data.len(), buf.len());
-        buf[0..limit].copy_from_slice(&data[0..limit]);
-        kprint!("[Driver fb0] Framebuffer updated: {} bytes.\n", limit);
-        limit
+        if offset >= buf.len() { return 0; }
+        let limit = core::cmp::min(offset + data.len(), buf.len());
+        let write_len = limit - offset;
+        buf[offset..limit].copy_from_slice(&data[0..write_len]);
+        kprint!("[Driver fb0] Framebuffer updated: {} bytes at offset {}.\n", write_len, offset);
+        write_len
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /dev/hda  — ATA Primary Master Hard Drive
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    fn ata_read_sectors(lba: u32, sector_count: u8, dest: *mut u8);
+    fn ata_write_sectors(lba: u32, sector_count: u8, src: *const u8);
+}
+
+pub struct AtaDriver;
+
+impl CharDriver for AtaDriver {
+    fn open(&self) -> Result<(), &'static str> { Ok(()) }
+
+    fn read(&self, offset: usize, size: usize) -> Vec<u8> {
+        let start_lba = (offset / 512) as u32;
+        let end_lba = ((offset + size + 511) / 512) as u32;
+        let sector_count = (end_lba - start_lba) as u8;
+        
+        let mut buf = vec![0u8; (sector_count as usize) * 512];
+        unsafe {
+            ata_read_sectors(start_lba, sector_count, buf.as_mut_ptr());
+        }
+        
+        let start_idx = offset % 512;
+        let end_idx = start_idx + size;
+        buf[start_idx..end_idx].to_vec()
+    }
+
+    fn write(&self, offset: usize, data: &[u8]) -> usize {
+        let start_lba = (offset / 512) as u32;
+        let end_lba = ((offset + data.len() + 511) / 512) as u32;
+        let sector_count = (end_lba - start_lba) as u8;
+        
+        // Read-Modify-Write if not aligned
+        let mut buf = vec![0u8; (sector_count as usize) * 512];
+        unsafe {
+            ata_read_sectors(start_lba, sector_count, buf.as_mut_ptr());
+        }
+        
+        let start_idx = offset % 512;
+        let end_idx = start_idx + data.len();
+        buf[start_idx..end_idx].copy_from_slice(data);
+        
+        unsafe {
+            ata_write_sectors(start_lba, sector_count, buf.as_ptr());
+        }
+        data.len()
     }
 }
 
@@ -113,8 +167,9 @@ impl DriverManager {
         dm.drivers.insert("/dev/fb0".to_string(),     Box::new(Fb0Driver {
             buffer: Mutex::new(vec![0u8; 4096]),
         }));
+        dm.drivers.insert("/dev/hda".to_string(),     Box::new(AtaDriver));
 
-        kprint!("[DriverManager] Registered: /dev/null, /dev/urandom, /dev/fb0\n");
+        kprint!("[DriverManager] Registered: /dev/null, /dev/urandom, /dev/fb0, /dev/hda\n");
         dm
     }
 
@@ -122,11 +177,11 @@ impl DriverManager {
         self.drivers.contains_key(path)
     }
 
-    pub fn read_device(&self, path: &str, size: usize) -> Option<Vec<u8>> {
-        self.drivers.get(path).map(|drv| drv.read(size))
+    pub fn read_device(&self, path: &str, offset: usize, size: usize) -> Option<Vec<u8>> {
+        self.drivers.get(path).map(|drv| drv.read(offset, size))
     }
 
-    pub fn write_device(&self, path: &str, data: &[u8]) -> Option<usize> {
-        self.drivers.get(path).map(|drv| drv.write(data))
+    pub fn write_device(&self, path: &str, offset: usize, data: &[u8]) -> Option<usize> {
+        self.drivers.get(path).map(|drv| drv.write(offset, data))
     }
 }

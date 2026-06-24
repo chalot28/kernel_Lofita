@@ -23,7 +23,7 @@ pub mod web;
 pub mod driver;
 
 use alloc::sync::Arc;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::mem;
 use spin::Mutex;
@@ -455,9 +455,9 @@ pub extern "C" fn rust_vfs_read(
         return -14; // EFAULT
     }
 
-    let state = kernel().lock();
-    let dm    = &state.driver;
-    match state.vfs.read(session_id, fd, buf_len, dm) {
+    let mut state = kernel().lock();
+    let dm_ptr: *const driver::DriverManager = &state.driver;
+    match state.vfs.read(session_id, fd, buf_len, unsafe { &*dm_ptr }) {
         Ok(data) => {
             let copy_len = core::cmp::min(data.len(), buf_len);
             unsafe {
@@ -600,4 +600,88 @@ pub extern "C" fn rust_syscall_dispatch(
             -38 // ENOSYS
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  SHELL INTERACTIVE COMMANDS (Ring 0)
+// ═══════════════════════════════════════════════════════════
+
+#[no_mangle]
+pub extern "C" fn rust_vfs_list_print(path_ptr: *const u8, path_len: usize) {
+    let path_slice = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
+    let req_path   = core::str::from_utf8(path_slice).unwrap_or("/");
+
+    // Normalize directory path to end with '/'
+    let mut dir_path = req_path.to_string();
+    if !dir_path.ends_with('/') {
+        dir_path.push('/');
+    }
+
+    let state = kernel().lock();
+    let mut found_any = false;
+    let mut printed_entries: Vec<String> = Vec::new();
+
+    // Helper to print direct children
+    let mut add_entry = |full_path: &str| {
+        if full_path.starts_with(&dir_path) {
+            let remainder = &full_path[dir_path.len()..];
+            let next_slash = remainder.find('/');
+            
+            let entry_name = match next_slash {
+                Some(idx) => {
+                    // It's a directory
+                    let mut s = remainder[0..idx].to_string();
+                    s.push('/');
+                    s
+                },
+                None => remainder.to_string(), // It's a file
+            };
+
+            if !entry_name.is_empty() && !printed_entries.contains(&entry_name) {
+                kprint!("  {}\n", entry_name);
+                printed_entries.push(entry_name);
+                found_any = true;
+            }
+        }
+    };
+
+    // 1. Scan RAMFS
+    for key in state.vfs.ramfs.keys() {
+        add_entry(key);
+    }
+
+    // 2. Scan Drivers (if looking inside /dev/ or /)
+    for key in state.driver.drivers.keys() {
+        add_entry(key);
+    }
+
+    if !found_any {
+        kprint!("  (empty or directory not found)\n");
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_vfs_cat_print(path_ptr: *const u8, path_len: usize) {
+    let path_slice = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
+    let path       = core::str::from_utf8(path_slice).unwrap_or("");
+
+    let state = kernel().lock();
+
+    // 1. Try RAMFS
+    if let Some(file) = state.vfs.ramfs.get(path) {
+        if let Ok(text) = core::str::from_utf8(&file.content) {
+            kprint!("{}\n", text);
+        } else {
+            kprint!("[Binary File - {} bytes]\n", file.content.len());
+        }
+        return;
+    }
+
+    // 2. Try Drivers
+    if state.driver.drivers.contains_key(path) {
+        kprint!("[Device File - use dd or specialized tools to read]\n");
+        return;
+    }
+
+    kprint!("cat: {}: No such file or directory\n", path);
 }

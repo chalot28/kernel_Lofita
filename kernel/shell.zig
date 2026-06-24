@@ -8,6 +8,11 @@
 const vga = @import("../drivers/vga.zig");
 const kb = @import("../drivers/keyboard.zig");
 const ppa = @import("../mm/ppa.zig");
+const ata = @import("../drivers/ata.zig");
+
+// Rust FFI functions for shell commands
+extern fn rust_vfs_list_print(path_ptr: [*]const u8, path_len: usize) void;
+extern fn rust_vfs_cat_print(path_ptr: [*]const u8, path_len: usize) void;
 
 // ---------------------------------------------------------------------------
 // Line-editing buffer
@@ -31,6 +36,9 @@ fn cmd_help() void {
     vga.print("  help                  Show this help message\n");
     vga.print("  clear                 Clear the screen\n");
     vga.print("  status                Show memory and kernel status\n");
+    vga.print("  diskinfo              Read sector 0 of ATA drive\n");
+    vga.print("  ls <path>             List directory contents\n");
+    vga.print("  cat <path>            Print file contents\n");
     vga.print("  echo <text>           Echo text back to the terminal\n");
     vga.print("  reboot                Halt the system\n");
     vga.set_color(.White, .Black);
@@ -74,6 +82,43 @@ fn cmd_echo(args: []const u8) void {
     vga.print("\n");
 }
 
+fn cmd_diskinfo() void {
+    vga.print("Reading Sector 0 from ATA Primary Master...\n");
+    var buf: [512]u8 = undefined;
+    ata.ata_read_sectors(0, 1, &buf);
+
+    vga.print("Boot Signature (bytes 510-511): 0x");
+    const hex = "0123456789ABCDEF";
+    vga.put_char(hex[(buf[511] >> 4) & 0xF]);
+    vga.put_char(hex[buf[511] & 0xF]);
+    vga.put_char(hex[(buf[510] >> 4) & 0xF]);
+    vga.put_char(hex[buf[510] & 0xF]);
+    vga.print("\n");
+
+    if (buf[510] == 0x55 and buf[511] == 0xAA) {
+        vga.set_color(.LightGreen, .Black);
+        vga.print("MBR Boot Signature VALID!\n");
+        vga.set_color(.White, .Black);
+    } else {
+        vga.set_color(.LightRed, .Black);
+        vga.print("Invalid or missing Boot Signature.\n");
+        vga.set_color(.White, .Black);
+    }
+}
+
+fn cmd_ls(args: []const u8) void {
+    const path = if (args.len == 0) "/" else args;
+    rust_vfs_list_print(path.ptr, path.len);
+}
+
+fn cmd_cat(args: []const u8) void {
+    if (args.len == 0) {
+        vga.print("Usage: cat <path>\n");
+        return;
+    }
+    rust_vfs_cat_print(args.ptr, args.len);
+}
+
 // ---------------------------------------------------------------------------
 // Simple command tokenizer
 // ---------------------------------------------------------------------------
@@ -101,6 +146,12 @@ fn execute_line(line: []const u8) void {
         vga.clear();
     } else if (eq(cmd, "status")) {
         cmd_status();
+    } else if (eq(cmd, "diskinfo")) {
+        cmd_diskinfo();
+    } else if (eq(cmd, "ls")) {
+        cmd_ls(args);
+    } else if (eq(cmd, "cat")) {
+        cmd_cat(args);
     } else if (eq(cmd, "echo")) {
         cmd_echo(args);
     } else if (eq(cmd, "reboot") or eq(cmd, "exit")) {

@@ -19,6 +19,7 @@ pub struct FileDescriptor {
     pub fd:           u32,
     pub path:         String,
     pub is_writeable: bool,
+    pub offset:       usize,
 }
 
 pub struct RamFile {
@@ -100,6 +101,7 @@ impl VfsState {
             fd,
             path: path.to_string(),
             is_writeable: is_write,
+            offset: 0,
         });
 
         kprint!("[VFS] Session {} opened '{}' -> FD {}\n", session_id, path, fd);
@@ -126,24 +128,30 @@ impl VfsState {
     }
 
     pub fn read(
-        &self,
+        &mut self,
         session_id: u64,
         fd: u32,
         size: usize,
         dm: &crate::driver::DriverManager,
     ) -> Result<Vec<u8>, &'static str> {
-        let table = self.fd_tables.get(&session_id).ok_or("Session not found")?;
-        let desc  = table.get(&fd).ok_or("Invalid file descriptor")?;
+        let table = self.fd_tables.get_mut(&session_id).ok_or("Session not found")?;
+        let desc  = table.get_mut(&fd).ok_or("Invalid file descriptor")?;
 
         if desc.path.starts_with("/dev/") {
-            if let Some(data) = dm.read_device(&desc.path, size) {
+            if let Some(data) = dm.read_device(&desc.path, desc.offset, size) {
+                desc.offset += data.len();
                 return Ok(data);
             }
         }
 
         if let Some(file) = self.ramfs.get(&desc.path) {
-            let limit = core::cmp::min(size, file.content.len());
-            return Ok(file.content[0..limit].to_vec());
+            if desc.offset >= file.content.len() {
+                return Ok(Vec::new()); // EOF
+            }
+            let limit = core::cmp::min(desc.offset + size, file.content.len());
+            let data = file.content[desc.offset..limit].to_vec();
+            desc.offset += data.len();
+            return Ok(data);
         }
         Err("File not found in RAMFS")
     }
@@ -155,24 +163,31 @@ impl VfsState {
         data: &[u8],
         dm: &crate::driver::DriverManager,
     ) -> Result<usize, &'static str> {
-        let path = {
+        let (path, offset) = {
             let table = self.fd_tables.get(&session_id).ok_or("Session not found")?;
             let desc  = table.get(&fd).ok_or("Invalid file descriptor")?;
             if !desc.is_writeable { return Err("FD not writable"); }
-            desc.path.clone()
+            (desc.path.clone(), desc.offset)
         };
 
-        if path.starts_with("/dev/") {
-            if let Some(n) = dm.write_device(&path, data) {
-                return Ok(n);
+        let written = if path.starts_with("/dev/") {
+            dm.write_device(&path, offset, data).ok_or("Device write failed")?
+        } else if let Some(file) = self.ramfs.get_mut(&path) {
+            let end = offset + data.len();
+            if end > file.content.len() {
+                file.content.resize(end, 0);
             }
-        }
+            file.content[offset..end].copy_from_slice(data);
+            kprint!("[VFS] Wrote {} bytes to '{}' at offset {}\n", data.len(), path, offset);
+            data.len()
+        } else {
+            return Err("File not found in RAMFS");
+        };
 
-        if let Some(file) = self.ramfs.get_mut(&path) {
-            file.content = data.to_vec();
-            kprint!("[VFS] Wrote {} bytes to '{}'\n", data.len(), path);
-            return Ok(data.len());
-        }
-        Err("File not found in RAMFS")
+        // Update offset
+        let table = self.fd_tables.get_mut(&session_id).unwrap();
+        let desc  = table.get_mut(&fd).unwrap();
+        desc.offset += written;
+        Ok(written)
     }
 }
