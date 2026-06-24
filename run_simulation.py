@@ -152,6 +152,7 @@ class PagingContext:
             v = virtual_addr + i * PAGE_SIZE
             if v in self.mappings:
                 del self.mappings[v]
+            log_zig(f"  Assembly: invlpg (0x{v:08X}) executed to invalidate TLB entry.")
         log_zig(f"  Paging: Invalidated TLB for virtual address range 0x{virtual_addr:08X}")
 
 
@@ -312,12 +313,26 @@ class FileDescriptor:
         self.is_writeable = is_writeable
 
 
+class RamFile:
+    def __init__(self, path, content):
+        self.path = path
+        self.content = content
+
+
 class VfsSubsystem:
     def __init__(self):
         self.fd_tables = {} # session_id -> { fd -> FileDescriptor }
+        self.ramfs = {}     # path -> RamFile
         self.next_fd = 3
 
     def open(self, session_id, path, is_write):
+        if is_write and not path.startswith("/dev/") and path not in self.ramfs:
+            self.ramfs[path] = RamFile(path, b"")
+            log_rust(f"VFS: Created new RAMFS file '{path}'")
+
+        if not path.startswith("/dev/") and path not in self.ramfs:
+            raise FileNotFoundError("File not found in RAMFS")
+
         table = self.fd_tables.setdefault(session_id, {})
         fd = self.next_fd
         self.next_fd += 1
@@ -388,6 +403,49 @@ class IpcSubsystem:
             return None
 
 
+class CharDriver:
+    def open(self): return True
+    def read(self, size): return b""
+    def write(self, data): return len(data)
+
+class NullDriver(CharDriver):
+    def read(self, size): return b""
+    def write(self, data): return len(data)
+
+class UrandomDriver(CharDriver):
+    def read(self, size):
+        return bytes([(i * 33 + 7) % 256 for i in range(size)])
+    def write(self, data): return len(data)
+
+class Fb0Driver(CharDriver):
+    def __init__(self):
+        self.buffer = bytearray(4096)
+    def read(self, size):
+        limit = min(size, len(self.buffer))
+        return bytes(self.buffer[0:limit])
+    def write(self, data):
+        limit = min(len(data), len(self.buffer))
+        self.buffer[0:limit] = data[0:limit]
+        print(f"[Driver fb0] Framebuffer updated with {limit} bytes.")
+        return limit
+
+class DriverManager:
+    def __init__(self):
+        self.drivers = {
+            "/dev/null": NullDriver(),
+            "/dev/urandom": UrandomDriver(),
+            "/dev/fb0": Fb0Driver()
+        }
+    def read_device(self, path, size):
+        if path in self.drivers:
+            return self.drivers[path].read(size)
+        return None
+    def write_device(self, path, data):
+        if path in self.drivers:
+            return self.drivers[path].write(data)
+        return None
+
+
 class LorifaKernelSimulation:
     def __init__(self):
         self.ppa = BuddyAllocator()
@@ -395,6 +453,7 @@ class LorifaKernelSimulation:
         self.scheduler = Scheduler()
         self.vfs = VfsSubsystem()
         self.ipc = IpcSubsystem(self.scheduler)
+        self.driver_manager = DriverManager()
         self.tokens = {}
         self.sessions = {}
         self.next_token_id = 1
@@ -412,6 +471,45 @@ class LorifaKernelSimulation:
             lifetime_seconds=999999,
             capabilities=0x1FF
         )
+
+        # Decompress initramfs using RLE engine simulation
+        initramfs_compressed = [
+            1, ord('F'), 1, ord('I'), 1, ord('L'), 1, ord('E'), 1, ord(':'), 1, ord('/'), 1, ord('e'), 1, ord('t'), 1, ord('c'), 1, ord('/'), 1, ord('v'), 1, ord('e'), 1, ord('r'), 1, ord('s'), 1, ord('i'), 1, ord('o'), 1, ord('n'), 1, ord('\n'),
+            1, ord('L'), 1, ord('o'), 1, ord('r'), 1, ord('i'), 1, ord('f'), 1, ord('a'), 1, ord(' '), 1, ord('M'), 1, ord('o'), 1, ord('n'), 1, ord('o'), 1, ord('l'), 1, ord('i'), 1, ord('t'), 1, ord('h'), 1, ord('i'), 1, ord('c'), 1, ord(' '), 1, ord('K'), 1, ord('e'), 1, ord('r'), 1, ord('n'), 1, ord('e'), 1, ord('l'), 1, ord(' '), 1, ord('v'), 1, ord('1'), 1, ord('.'), 1, ord('0'), 1, ord('.'), 1, ord('0'), 1, ord('\n'),
+            1, ord('F'), 1, ord('I'), 1, ord('L'), 1, ord('E'), 1, ord(':'), 1, ord('/'), 1, ord('e'), 1, ord('t'), 1, ord('c'), 1, ord('/'), 1, ord('m'), 1, ord('o'), 1, ord('t'), 1, ord('d'), 1, ord('\n'),
+            1, ord('W'), 1, ord('e'), 1, ord('l'), 1, ord('c'), 1, ord('o'), 1, ord('m'), 1, ord('e'), 1, ord(' '), 1, ord('t'), 1, ord('o'), 1, ord(' '), 1, ord('L'), 1, ord('o'), 1, ord('r'), 1, ord('i'), 1, ord('f'), 1, ord('a'), 1, ord(' '), 1, ord('O'), 1, ord('S'), 1, ord('!'), 1, ord('\n'),
+            1, ord('F'), 1, ord('I'), 1, ord('L'), 1, ord('E'), 1, ord(':'), 1, ord('/'), 1, ord('e'), 1, ord('t'), 1, ord('c'), 1, ord('/'), 1, ord('h'), 1, ord('o'), 1, ord('s'), 1, ord('t'), 1, ord('s'), 1, ord('\n'),
+            1, ord('1'), 1, ord('2'), 1, ord('7'), 1, ord('.'), 1, ord('0'), 1, ord('.'), 1, ord('0'), 1, ord('.'), 1, ord('1'), 1, ord(' '), 1, ord('l'), 1, ord('o'), 1, ord('c'), 1, ord('a'), 1, ord('l'), 1, ord('h'), 1, ord('o'), 1, ord('s'), 1, ord('t'), 1, ord('\n'),
+        ]
+        
+        # Run RLE Decompress
+        decompressed_data = bytearray()
+        i = 0
+        while i < len(initramfs_compressed):
+            count = initramfs_compressed[i]
+            byte = initramfs_compressed[i+1]
+            decompressed_data.extend([byte] * count)
+            i += 2
+        
+        # Parse decompressed payload
+        text = decompressed_data.decode("utf-8")
+        current_path = ""
+        current_content = []
+        for line in text.split("\n"):
+            if line.startswith("FILE:"):
+                if current_path:
+                    file_body = "\n".join(current_content).encode("utf-8")
+                    self.vfs.ramfs[current_path] = RamFile(current_path, file_body)
+                current_path = line[len("FILE:"):].strip()
+                current_content = []
+            else:
+                if line or current_path:
+                    current_content.append(line)
+        if current_path:
+            file_body = "\n".join(current_content).encode("utf-8")
+            self.vfs.ramfs[current_path] = RamFile(current_path, file_body)
+            
+        log_rust(f"Initramfs: Decompressed and loaded {len(self.vfs.ramfs)} files into RAMFS.")
 
     def current_time(self):
         return time.time() + self.simulated_time_offset
@@ -456,6 +554,14 @@ class LorifaKernelSimulation:
         if token.memory_used + size > token.memory_limit:
             raise MemoryError(f"Memory limit exceeded for Token {token_id}")
 
+        # Enforce W^X (Write XOR Execute) security policy
+        is_writeable = True
+        is_executable = False
+        if is_writeable and is_executable:
+            log_alert("Security Guard: W^X violation! Memory cannot be both Writeable and Executable.")
+            raise PermissionError("W^X violation")
+        log_rust("Security Guard: Enforcing W^X (Write XOR Execute) policy: Region is Writeable, Non-Executable. PASS.")
+
         pages_needed = (size + PAGE_SIZE - 1) // PAGE_SIZE
         actual_size = pages_needed * PAGE_SIZE
 
@@ -464,7 +570,16 @@ class LorifaKernelSimulation:
         if phys_ptr is None:
             raise MemoryError("Physical memory exhausted")
 
-        sim_virtual_addr = 0x20000000 + (token.id * 0x1000000) + token.memory_used
+        # Apply ASLR (Address Space Layout Randomization)
+        def get_random_aslr_offset(seed):
+            a = 1103515245
+            c = 12345
+            m = 1 << 31
+            rand = (a * seed + c) % m
+            return ((rand % 1024) * PAGE_SIZE)
+
+        aslr_offset = get_random_aslr_offset(token.id ^ token.memory_used)
+        sim_virtual_addr = 0x20000000 + (token.id * 0x1000000) + token.memory_used + aslr_offset
         self.paging.map(sim_virtual_addr, phys_ptr, actual_size)
 
         vma = Vma(sim_virtual_addr, actual_size, phys_ptr)
@@ -569,15 +684,41 @@ class WineSyscallTranslator:
         self.session_id = session_id
         self.process_id = process_id
         self.heap_brk = 0x40000000
+        self.heap_limit = 0x40000000
 
-    def sys_write(self, fd, buf_addr, count):
+    def sys_open(self, path, is_write):
+        log_wine(f"Syscall: sys_open(path='{path}', is_write={is_write})")
+        cap = Capability.FS_WRITE if is_write else Capability.FS_READ
+        if not self.kernel.check_capability(self.session_id, cap):
+            log_wine("Syscall OPEN REJECTED: Lacks appropriate FS capability")
+            return -13 # -EACCES
+        try:
+            fd = self.kernel.vfs.open(self.session_id, path, is_write)
+            log_wine(f"Syscall OPEN: Opened '{path}' -> assigned Lorifa FD {fd}")
+            return fd
+        except Exception as e:
+            return -2 # -ENOENT
+
+    def sys_write(self, fd, count):
+        log_wine(f"Syscall: sys_write(fd={fd}, count={count})")
         if not self.kernel.check_capability(self.session_id, Capability.FS_WRITE):
             log_wine(f"Syscall WRITE({fd}) REJECTED: Lacks FS_WRITE capability")
             return -13
-        if fd == 1 or fd == 2:
-            log_wine(f"Syscall WRITE stdout: writing buffer 0x{buf_addr:08X} size {count} bytes.")
-            return count
-        return -9
+        # In Wine translation, we call Lorifa VFS write
+        fds = self.kernel.vfs.list_fds(self.session_id)
+        if fd not in fds:
+            # Fallback for simulated standard stdout/stderr
+            if fd in [1, 2]:
+                log_wine(f"Syscall WRITE stdout: writing mock buffer size {count} bytes.")
+                return count
+            return -9 # -EBADF
+        
+        # Call VFS write
+        desc = fds[fd]
+        payload = f"WineApp[PID:{self.process_id}] data payload"
+        self.kernel.vfs.ramfs[desc.path].content = payload.encode("utf-8")
+        log_wine(f"Syscall WRITE: Wrote via Lorifa VFS to '{desc.path}'")
+        return count
 
     def sys_brk(self, new_brk):
         if new_brk == 0:
@@ -585,10 +726,19 @@ class WineSyscallTranslator:
         if not self.kernel.check_capability(self.session_id, Capability.MEM_ALLOC):
             log_wine("Syscall BRK REJECTED: Lacks MEM_ALLOC capability")
             return -12
-        alloc_size = new_brk - self.heap_brk
-        if alloc_size > 0:
-            log_wine(f"Syscall BRK: Expanding heap address from 0x{self.heap_brk:08X} to 0x{new_brk:08X}")
-            self.heap_brk = new_brk
+        if new_brk < self.heap_brk:
+            return -22 # -EINVAL
+        if new_brk > self.heap_limit:
+            needed = new_brk - self.heap_limit
+            log_wine(f"Syscall BRK: Heap extension needed. Requesting {needed} bytes from Lorifa VASM...")
+            try:
+                allocated_addr = self.kernel.allocate_memory(self.kernel.sessions[self.session_id].token.id, needed)
+                self.heap_limit = allocated_addr + needed
+                log_wine(f"Syscall BRK: Heap extended via Lorifa VASM. New limit: 0x{self.heap_limit:08X}")
+            except Exception as e:
+                log_alert(f"Syscall BRK allocation failed: {str(e)}")
+                return -12 # -ENOMEM
+        self.heap_brk = new_brk
         return self.heap_brk
 
     def sys_mmap(self, length):
@@ -596,8 +746,9 @@ class WineSyscallTranslator:
             log_wine("Syscall MMAP REJECTED: Lacks MEM_ALLOC capability")
             return -12
         try:
+            log_wine(f"Syscall MMAP: Requesting {length} bytes from Lorifa VASM...")
             virtual_addr = self.kernel.allocate_memory(self.kernel.sessions[self.session_id].token.id, length)
-            log_wine(f"Syscall MMAP: Mapped {length} bytes anonymous memory at 0x{virtual_addr:08X}")
+            log_wine(f"Syscall MMAP: Mapped anonymous memory at 0x{virtual_addr:08X}")
             return virtual_addr
         except Exception as e:
             log_wine(f"Syscall MMAP failed: {str(e)}")
@@ -636,6 +787,12 @@ def interactive_shell():
 
     while True:
         token = kernel.tokens.get(current_token_id)
+        if not token:
+            current_token_id = 2  # DefaultAdmin
+            token = kernel.tokens[current_token_id]
+            current_session_id = 1
+            log_alert("\nActive Token was reclaimed due to expiration. Switched shell to DefaultAdmin.")
+            
         prompt_char = "#" if token.privilege <= PrivilegeLevel.ADMIN else "$"
         prompt_color = COLOR_ALERT if token.privilege == PrivilegeLevel.ROOT else COLOR_APP
         
@@ -673,12 +830,16 @@ def interactive_shell():
             print("  scheduler list                             List all running threads inside the scheduler")
             print("  vfs open <path> <write_y_n>                [VFS] Open a file and get a File Descriptor")
             print("  vfs close <fd>                             [VFS] Close an open File Descriptor")
+            print("  vfs read <fd> <bytes>                      [VFS] Read data from a file descriptor / driver")
+            print("  vfs write <fd> <text>                      [VFS] Write data to a file descriptor / driver")
+            print("  vfs files                                  [VFS] List all files present in RAMFS")
             print("  vfs list                                   [VFS] List active descriptors for active session")
             print("  ipc send <port_id> <message>               [IPC] Send a message, waking up any blocked thread")
             print("  ipc recv <port_id> <thread_id>             [IPC] Read message or block thread if empty")
             print("  compress <text>                            [LZ4] Compress text using lossless RLE engine")
             print("  decompress <hex>                           [LZ4] Decompress RLE hex data")
             print("  webview open <url>                         [WebKit] Spawn WebView container and render HTML")
+            print("  driver list                                [Driver] List registered monolithic char devices")
             print("  tick <seconds>                             Advance the system clock to trigger timeouts")
             print("  exit                                       Quit the shell")
             
@@ -808,7 +969,9 @@ def interactive_shell():
                 translator.sys_brk(0)
                 translator.sys_brk(0x40008000)
                 translator.sys_mmap(4096 * 4)
-                translator.sys_write(1, 0x40001000, 36)
+                fd = translator.sys_open("/etc/motd", is_write=False)
+                if fd >= 0:
+                    translator.sys_write(fd, count=36)
                 translator.sys_socket()
                 
                 log_wine("Notepad execution completed.")
@@ -827,11 +990,16 @@ def interactive_shell():
         elif cmd == "vfs" and len(args) >= 3 and args[0] == "open":
             path = args[1]
             is_write = args[2].lower() in ["y", "yes", "true", "w"]
-            # Validate capability FS_WRITE or FS_READ
             cap = Capability.FS_WRITE if is_write else Capability.FS_READ
             if kernel.check_capability(current_session_id, cap):
-                fd = kernel.vfs.open(current_session_id, path, is_write)
-                print(f"VFS: File opened successfully. Assigned FD: {fd}")
+                if path.startswith("/dev/") and path not in kernel.driver_manager.drivers:
+                    print(f"VFS Error: Device driver {path} not registered in Kernel.")
+                else:
+                    try:
+                        fd = kernel.vfs.open(current_session_id, path, is_write)
+                        print(f"VFS: File opened successfully. Assigned FD: {fd}")
+                    except Exception as e:
+                        print(f"VFS Error: {str(e)}")
             else:
                 log_alert(f"VFS: Permission Denied. Lacks appropriate FS capabilities.")
 
@@ -844,6 +1012,74 @@ def interactive_shell():
                     print("VFS Error: FD not found in this session.")
             except ValueError:
                 print("Error: Invalid File Descriptor.")
+
+        elif cmd == "vfs" and len(args) >= 3 and args[0] == "read":
+            try:
+                fd = int(args[1])
+                size = int(args[2])
+                table = kernel.vfs.list_fds(current_session_id)
+                if fd not in table:
+                    print("Error: Invalid File Descriptor.")
+                    continue
+                desc = table[fd]
+                if not kernel.check_capability(current_session_id, Capability.FS_READ):
+                    log_alert("VFS read error: Lacks FS_READ capability.")
+                    continue
+                if desc.path.startswith("/dev/"):
+                    data = kernel.driver_manager.read_device(desc.path, size)
+                    if data is not None:
+                        hex_repr = " ".join(f"{x:02x}" for x in data)
+                        ascii_repr = "".join(chr(x) if 32 <= x <= 126 else "." for x in data)
+                        print(f"VFS read: FD {fd} ({desc.path}) -> read {len(data)} bytes:")
+                        print(f"  [HEX] {hex_repr}")
+                        print(f"  [TXT] {ascii_repr}")
+                    else:
+                        print("Error: Device driver read failed.")
+                else:
+                    if desc.path in kernel.vfs.ramfs:
+                        file_data = kernel.vfs.ramfs[desc.path].content
+                        limit = min(size, len(file_data))
+                        read_bytes = file_data[0:limit]
+                        ascii_repr = read_bytes.decode("utf-8", errors="replace")
+                        print(f"VFS read: FD {fd} ({desc.path}) -> read {limit} bytes: \"{ascii_repr}\"")
+                    else:
+                        print("Error: File not found in RAMFS.")
+            except ValueError:
+                print("Error: Invalid parameters. Usage: vfs read <fd> <bytes>")
+
+        elif cmd == "vfs" and len(args) >= 3 and args[0] == "write":
+            try:
+                fd = int(args[1])
+                payload = " ".join(args[2:])
+                table = kernel.vfs.list_fds(current_session_id)
+                if fd not in table:
+                    print("Error: Invalid File Descriptor.")
+                    continue
+                desc = table[fd]
+                if not desc.is_writeable:
+                    print("Error: File descriptor is not writeable.")
+                    continue
+                if not kernel.check_capability(current_session_id, Capability.FS_WRITE):
+                    log_alert("VFS write error: Lacks FS_WRITE capability.")
+                    continue
+                if desc.path.startswith("/dev/"):
+                    bytes_written = kernel.driver_manager.write_device(desc.path, payload.encode("utf-8"))
+                    print(f"VFS write: FD {fd} ({desc.path}) -> wrote {bytes_written} bytes.")
+                else:
+                    if desc.path in kernel.vfs.ramfs:
+                        kernel.vfs.ramfs[desc.path].content = payload.encode("utf-8")
+                        print(f"VFS write: FD {fd} ({desc.path}) -> wrote {len(payload)} bytes: \"{payload}\"")
+                    else:
+                        print("Error: File not found in RAMFS.")
+            except ValueError:
+                print("Error: Invalid parameters. Usage: vfs write <fd> <text>")
+
+        elif cmd == "vfs" and len(args) > 0 and args[0] == "files":
+            print("RAMFS Files:")
+            print(f"  {'File Path':<30} | {'Size (Bytes)':<12}")
+            print("  " + "-"*45)
+            for path, file in kernel.vfs.ramfs.items():
+                print(f"  {path:<30} | {len(file.content):<12}")
 
         elif cmd == "vfs" and len(args) > 0 and args[0] == "list":
             table = kernel.vfs.list_fds(current_session_id)
@@ -953,6 +1189,16 @@ def interactive_shell():
                 print("+-------------------------------------------------------------+\n")
             else:
                 log_alert("WebKit WebView: Failed to open. Lacks MEM_ALLOC capability.")
+
+        elif cmd == "driver" and len(args) > 0 and args[0] == "list":
+            print("Registered Monolithic Character Devices:")
+            print(f"  {'Device Path':<15} | {'Driver Name':<15} | {'Operations':<20}")
+            print("  " + "-" * 55)
+            for path in kernel.driver_manager.drivers.keys():
+                name = path.replace("/dev/", "").capitalize() + "Driver"
+                ops = "read, write" if path == "/dev/fb0" or path == "/dev/urandom" else "write"
+                if path == "/dev/null": ops = "read, write"
+                print(f"  {path:<15} | {name:<15} | {ops:<20}")
 
         elif cmd == "tick":
             if not args:

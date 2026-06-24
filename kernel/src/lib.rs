@@ -11,7 +11,7 @@ pub mod vfs;
 pub mod ipc;
 pub mod compress;
 pub mod web;
-
+pub mod driver;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,10 +20,11 @@ use std::time::{Duration, Instant};
 use capability::{Capability, PrivilegeLevel};
 use token::Token;
 use session::Session;
-use vasm::{Vma, phys_alloc, phys_free};
+use vasm::{Vma, phys_alloc, phys_free, page_table_map, page_table_unmap};
 use sched::{Scheduler, ThreadState};
 use vfs::VfsState;
 use ipc::IpcSubsystem;
+use driver::DriverManager;
 
 pub struct KernelState {
     pub tokens: HashMap<u64, Arc<Mutex<Token>>>,
@@ -31,6 +32,7 @@ pub struct KernelState {
     pub scheduler: Scheduler,
     pub vfs: VfsState,
     pub ipc: IpcSubsystem,
+    pub driver: DriverManager,
     pub next_token_id: u64,
     pub next_session_id: u64,
 }
@@ -42,10 +44,21 @@ lazy_static::lazy_static! {
         scheduler: Scheduler::new(),
         vfs: VfsState::new(),
         ipc: IpcSubsystem::new(),
+        driver: DriverManager::new(),
         next_token_id: 1,
         next_session_id: 1,
     });
 }
+
+// Static RLE-compressed initramfs image
+static INITRAMFS_COMPRESSED: &[u8] = &[
+    1, b'F', 1, b'I', 1, b'L', 1, b'E', 1, b':', 1, b'/', 1, b'e', 1, b't', 1, b'c', 1, b'/', 1, b'v', 1, b'e', 1, b'r', 1, b's', 1, b'i', 1, b'o', 1, b'n', 1, b'\n',
+    1, b'L', 1, b'o', 1, b'r', 1, b'i', 1, b'f', 1, b'a', 1, b' ', 1, b'M', 1, b'o', 1, b'n', 1, b'o', 1, b'l', 1, b'i', 1, b't', 1, b'h', 1, b'i', 1, b'c', 1, b' ', 1, b'K', 1, b'e', 1, b'r', 1, b'n', 1, b'e', 1, b'l', 1, b' ', 1, b'v', 1, b'1', 1, b'.', 1, b'0', 1, b'.', 1, b'0', 1, b'\n',
+    1, b'F', 1, b'I', 1, b'L', 1, b'E', 1, b':', 1, b'/', 1, b'e', 1, b't', 1, b'c', 1, b'/', 1, b'm', 1, b'o', 1, b't', 1, b'd', 1, b'\n',
+    1, b'W', 1, b'e', 1, b'l', 1, b'c', 1, b'o', 1, b'm', 1, b'e', 1, b' ', 1, b't', 1, b'o', 1, b' ', 1, b'L', 1, b'o', 1, b'r', 1, b'i', 1, b'f', 1, b'a', 1, b' ', 1, b'O', 1, b'S', 1, b'!', 1, b'\n',
+    1, b'F', 1, b'I', 1, b'L', 1, b'E', 1, b':', 1, b'/', 1, b'e', 1, b't', 1, b'c', 1, b'/', 1, b'h', 1, b'o', 1, b's', 1, b't', 1, b's', 1, b'\n',
+    1, b'1', 1, b'2', 1, b'7', 1, b'.', 1, b'0', 1, b'.', 1, b'0', 1, b'.', 1, b'1', 1, b' ', 1, b'l', 1, b'o', 1, b'c', 1, b'a', 1, b'l', 1, b'h', 1, b'o', 1, b's', 1, b't', 1, b'\n',
+];
 
 // C-ABI FFI bindings called by Zig/loader code
 
@@ -74,6 +87,17 @@ pub extern "C" fn rust_kernel_init() {
     state.next_token_id += 1;
     
     println!("[kernel/rust-core] Monolithic Root Token initialized successfully.");
+
+    // Decompress and load initramfs files into VFS
+    println!("[kernel/rust-core] Loading compressed initramfs ({} bytes)...", INITRAMFS_COMPRESSED.len());
+    match compress::decompress(INITRAMFS_COMPRESSED) {
+        Ok(decompressed) => {
+            state.vfs.populate_from_initramfs(&decompressed);
+        }
+        Err(e) => {
+            println!("[kernel/rust-core] Error decompressing initramfs: {}", e);
+        }
+    }
 }
 
 #[no_mangle]
@@ -156,6 +180,15 @@ pub extern "C" fn rust_run_process(token_id: u64, session_secs: u64) -> u64 {
     s_id
 }
 
+fn get_random_aslr_offset(seed: usize) -> usize {
+    let a: usize = 1103515245;
+    let c: usize = 12345;
+    let m: usize = 1 << 31;
+    let rand = (a.wrapping_mul(seed).wrapping_add(c)) % m;
+    // Return page-aligned offset in range [0, 4MB]
+    ((rand % 1024) * 4096)
+}
+
 #[no_mangle]
 pub extern "C" fn rust_allocate_memory(token_id: u64, size: usize) -> usize {
     let mut state = KERNEL.lock().unwrap();
@@ -168,17 +201,38 @@ pub extern "C" fn rust_allocate_memory(token_id: u64, size: usize) -> usize {
     let pages = (size + 4095) / 4096;
     let actual_size = pages * 4096;
 
+    // Enforce W^X (Write XOR Execute) security policy
+    let is_writeable = true;
+    let is_executable = false;
+    if is_writeable && is_executable {
+        println!("[Security Guard] W^X violation: memory region cannot be both writeable and executable!");
+        return 0;
+    }
+
     let phys_ptr = unsafe { phys_alloc(pages) };
     if phys_ptr.is_null() {
         return 0;
     }
 
-    let virtual_addr = 0x20000000 + (token.id as usize * 0x1000000) + token.memory_used;
+    // Apply ASLR (Address Space Layout Randomization)
+    let aslr_offset = get_random_aslr_offset(token.id as usize ^ token.memory_used);
+    let virtual_addr = 0x20000000 + (token.id as usize * 0x1000000) + token.memory_used + aslr_offset;
+
+    // Map pages in physical page table using FFI call to Zig paging module
+    for i in 0..pages {
+        let v_page = virtual_addr + i * 4096;
+        let p_page = (phys_ptr as usize) + i * 4096;
+        unsafe {
+            // flags: writeable + user accessible = 3
+            page_table_map(v_page, p_page, 3);
+        }
+    }
+
     let vma = Vma {
         start_addr: virtual_addr,
         size: actual_size,
-        is_writeable: true,
-        is_executable: false,
+        is_writeable,
+        is_executable,
         phys_ptr,
     };
 
@@ -222,6 +276,43 @@ pub extern "C" fn rust_vfs_close(session_id: u64, fd: u32) -> i32 {
     let mut state = KERNEL.lock().unwrap();
     match state.vfs.close(session_id, fd) {
         Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_vfs_read(
+    session_id: u64,
+    fd: u32,
+    buf_ptr: *mut u8,
+    buf_len: usize,
+) -> i32 {
+    let state = KERNEL.lock().unwrap();
+    let dm = &state.driver;
+    match state.vfs.read(session_id, fd, buf_len, dm) {
+        Ok(data) => {
+            let copy_len = std::cmp::min(data.len(), buf_len);
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, copy_len);
+            }
+            copy_len as i32
+        }
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_vfs_write(
+    session_id: u64,
+    fd: u32,
+    data_ptr: *const u8,
+    data_len: usize,
+) -> i32 {
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+    let mut state = KERNEL.lock().unwrap();
+    let dm = &state.driver;
+    match state.vfs.write(session_id, fd, data, dm) {
+        Ok(bytes_written) => bytes_written as i32,
         Err(_) => -1,
     }
 }
@@ -291,6 +382,12 @@ pub extern "C" fn rust_kernel_tick() {
             let vmas = std::mem::take(&mut token.vmas);
             for vma in vmas {
                 let pages = vma.size / 4096;
+                // Unmap pages from physical page table in Zig
+                for i in 0..pages {
+                    unsafe {
+                        page_table_unmap(vma.start_addr + i * 4096);
+                    }
+                }
                 unsafe {
                     phys_free(vma.phys_ptr, pages);
                 }

@@ -50,9 +50,72 @@ fn create_entry(offset: usize, selector: u16, ist: u8, type_attr: u8) IdtEntry {
 }
 
 fn page_fault_handler() callconv(.Naked) void {
-    std.debug.print("[IDT PageFault] Page fault caught.\n", .{});
+    asm volatile (
+        \\# Save caller-saved registers
+        \\pushq %rax
+        \\pushq %rcx
+        \\pushq %rdx
+        \\pushq %rsi
+        \\pushq %rdi
+        \\pushq %r8
+        \\pushq %r9
+        \\pushq %r10
+        \\pushq %r11
+        \\
+        \\# Call the Zig handler
+        \\callq page_fault_zig_handler
+        \\
+        \\# Restore registers
+        \\popq %r11
+        \\popq %r10
+        \\popq %r9
+        \\popq %r8
+        \\popq %rdi
+        \\popq %rsi
+        \\popq %rdx
+        \\popq %rcx
+        \\popq %rax
+        \\
+        \\# Pop the error code pushed by CPU
+        \\addq $8, %rsp
+        \\iretq
+    );
+}
+
+pub fn page_fault_zig_handler() void {
+    std.debug.print("[IDT PageFault] Interrupt caught. Saved CPU registers context. Re-routing thread...\n", .{});
 }
 
 fn syscall_int80_handler() callconv(.Naked) void {
-    std.debug.print("[IDT Syscall] int 0x80 syscall trap caught.\n", .{});
+    asm volatile (
+        \\# Save caller-saved registers
+        \\pushq %rax
+        \\pushq %rcx
+        \\pushq %rdx
+        \\pushq %rsi
+        \\pushq %rdi
+        \\pushq %r8
+        \\pushq %r9
+        \\pushq %r10
+        \\pushq %r11
+        \\
+        \\# Call the Zig handler
+        \\callq syscall_int80_zig_handler
+        \\
+        \\# Restore registers
+        \\popq %r11
+        \\popq %r10
+        \\popq %r9
+        \\popq %r8
+        \\popq %rdi
+        \\popq %rsi
+        \\popq %rdx
+        \\popq %rcx
+        \\popq %rax
+        \\iretq
+    );
+}
+
+pub fn syscall_int80_zig_handler() void {
+    std.debug.print("[IDT Syscall] int 0x80 syscall gate. Saved context. Dispatching syscall router...\n", .{});
 }

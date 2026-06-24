@@ -61,5 +61,28 @@ pub const PagingContext = struct {
 };
 
 inline fn invlpg(virtual_addr: usize) void {
-    _ = virtual_addr;
+    asm volatile ("invlpg (%rdi)"
+        :
+        : [addr] "{rdi}" (virtual_addr)
+        : "memory"
+    );
+}
+
+var kernel_paging_context: PagingContext = undefined;
+var paging_initialized: bool = false;
+
+pub fn paging_global_init() void {
+    kernel_paging_context = PagingContext.init();
+    paging_initialized = true;
+}
+
+pub export fn page_table_map(virtual_addr: usize, physical_addr: usize, flags: u32) i32 {
+    if (!paging_initialized) paging_global_init();
+    kernel_paging_context.map(virtual_addr, physical_addr, flags) catch return -1;
+    return 0;
+}
+
+pub export fn page_table_unmap(virtual_addr: usize) void {
+    if (!paging_initialized) paging_global_init();
+    kernel_paging_context.unmap(virtual_addr);
 }

@@ -5,6 +5,8 @@
 extern "C" {
     pub fn phys_alloc(pages: usize) -> *mut u8;
     pub fn phys_free(ptr: *mut u8, pages: usize);
+    pub fn page_table_map(virtual_addr: usize, physical_addr: usize, flags: u32) -> i32;
+    pub fn page_table_unmap(virtual_addr: usize);
 }
 
 #[derive(Debug)]

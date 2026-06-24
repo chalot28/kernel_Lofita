@@ -24,6 +24,10 @@ pub fn main() !void {
     // 3. Physical Page Allocator (PPA)
     ppa.ppa_init();
 
+    // 3.5. Page Table Initialization
+    const paging = @import("../arch/x86_64/mm/paging.zig");
+    paging.paging_global_init();
+
     // 4. Rust Core policies & TMD
     std.debug.print("[init] Low-level initializations complete. Invoking Rust Core...\n", .{});
     rust_kernel_init();

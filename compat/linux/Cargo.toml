@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Standard library features
+lorifa_kernel_core = { path = "../../kernel" }
