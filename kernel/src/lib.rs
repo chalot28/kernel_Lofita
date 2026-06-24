@@ -21,6 +21,7 @@ pub mod ipc;
 pub mod compress;
 pub mod web;
 pub mod driver;
+pub mod fs;
 
 use alloc::sync::Arc;
 use alloc::string::{String, ToString};
@@ -212,6 +213,18 @@ pub extern "C" fn rust_kernel_init() {
         }
         Err(e) => {
             kprint!("[kernel/rust] initramfs error: {}\n", e);
+        }
+    }
+
+    // 4. Try mounting Ext2 on /dev/hda
+    kprint!("[kernel/rust] Probing for Ext2 filesystem on /dev/hda...\n");
+    match crate::fs::ext2::Ext2Fs::mount("/dev/hda", &state.driver) {
+        Ok(ext2) => {
+            state.vfs.ext2_fs = Some(ext2);
+        }
+        Err(e) => {
+            kprint!("[kernel/rust] Ext2 mount failed or not found: {}\n", e);
+            state.vfs.ext2_err = Some(String::from(e));
         }
     }
 
@@ -655,6 +668,37 @@ pub extern "C" fn rust_vfs_list_print(path_ptr: *const u8, path_len: usize) {
         add_entry(key);
     }
 
+    // 3. Scan Ext2 if mounted
+    if let Some(ref ext2) = state.vfs.ext2_fs {
+        if dir_path == "/" {
+            add_entry("/mnt/");
+        } else if dir_path == "/mnt/" {
+            add_entry("/mnt/ext2/");
+        } else if dir_path.starts_with("/mnt/ext2/") {
+            let rel_path = &dir_path["/mnt/ext2/".len()..];
+            let inode_num = if rel_path.is_empty() {
+                crate::fs::ext2::EXT2_ROOT_INODE
+            } else {
+                ext2.resolve_path(rel_path.trim_end_matches('/'), &state.driver).unwrap_or(0)
+            };
+            
+            if inode_num != 0 {
+                let entries = ext2.list_dir(inode_num, &state.driver);
+                for entry in entries {
+                    kprint!("  {}\n", entry);
+                    found_any = true;
+                }
+            }
+        }
+    } else {
+        if dir_path.starts_with("/mnt/ext2/") {
+            if let Some(ref err) = state.vfs.ext2_err {
+                kprint!("  (Ext2 not mounted: {})\n", err);
+                found_any = true;
+            }
+        }
+    }
+
     if !found_any {
         kprint!("  (empty or directory not found)\n");
     }
@@ -681,6 +725,29 @@ pub extern "C" fn rust_vfs_cat_print(path_ptr: *const u8, path_len: usize) {
     if state.driver.drivers.contains_key(path) {
         kprint!("[Device File - use dd or specialized tools to read]\n");
         return;
+    }
+
+    // 3. Try Ext2
+    if path.starts_with("/mnt/ext2/") {
+        if let Some(ref ext2) = state.vfs.ext2_fs {
+            let rel_path = &path["/mnt/ext2/".len()..];
+            if let Some(inode_num) = ext2.resolve_path(rel_path, &state.driver) {
+                if let Some(inode) = ext2.get_inode(inode_num, &state.driver) {
+                    if (inode.i_mode & 0xF000) != 0x4000 {
+                        let data = ext2.read_inode_data(&inode, &state.driver);
+                        if let Ok(text) = core::str::from_utf8(&data) {
+                            kprint!("{}\n", text);
+                        } else {
+                            kprint!("[Binary File - {} bytes]\n", data.len());
+                        }
+                        return;
+                    } else {
+                        kprint!("cat: {}: Is a directory\n", path);
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     kprint!("cat: {}: No such file or directory\n", path);

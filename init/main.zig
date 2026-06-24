@@ -69,7 +69,13 @@ pub export fn kernel_main() noreturn {
     paging.paging_global_init();
 
     // -----------------------------------------------------------------------
-    // 6. Rust Core — initialize kernel policies, token system, VFS, IPC
+    // 6. ATA PIO Hard Drive — probe primary master before Rust accesses it
+    // -----------------------------------------------------------------------
+    vga.print("[init] Initializing ATA Storage...\n");
+    ata.ata_init();
+
+    // -----------------------------------------------------------------------
+    // 7. Rust Core — initialize kernel policies, token system, VFS, IPC
     // -----------------------------------------------------------------------
     vga.print("[init] Invoking Rust core subsystems...\n");
     rust_kernel_init();
@@ -86,12 +92,6 @@ pub export fn kernel_main() noreturn {
     // -----------------------------------------------------------------------
     vga.print("[init] Initializing PIC...\n");
     pic.pic_init();
-
-    // -----------------------------------------------------------------------
-    // 7.5. ATA PIO Hard Drive — probe primary master
-    // -----------------------------------------------------------------------
-    vga.print("[init] Initializing ATA Storage...\n");
-    ata.ata_init();
 
     // -----------------------------------------------------------------------
     // 8. PS/2 Keyboard — initialise controller and enable IRQ1

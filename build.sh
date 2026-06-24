@@ -97,6 +97,7 @@ run_qemu() {
     check_tool "${QEMU}"
     ${QEMU} \
         -cdrom     "${ISO_OUT}" \
+        -drive     file=disk.img,format=raw,index=0,media=disk \
         -m         256M \
         -serial    stdio \
         -display   sdl \

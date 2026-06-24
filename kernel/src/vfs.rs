@@ -14,6 +14,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::str;
 use crate::kprint;
+use crate::driver::DriverManager;
+use crate::fs::ext2::Ext2Fs;
 
 pub struct FileDescriptor {
     pub fd:           u32,
@@ -32,6 +34,8 @@ pub struct VfsState {
     pub fd_tables: HashMap<u64, HashMap<u32, FileDescriptor>>,
     /// path → file
     pub ramfs:     HashMap<String, RamFile>,
+    pub ext2_fs:   Option<Ext2Fs>,
+    pub ext2_err:  Option<String>,
     pub next_fd:   u32,
 }
 
@@ -40,6 +44,8 @@ impl VfsState {
         VfsState {
             fd_tables: HashMap::new(),
             ramfs:     HashMap::new(),
+            ext2_fs:   None,
+            ext2_err:  None,
             next_fd:   3, // 0: stdin, 1: stdout, 2: stderr
         }
     }
@@ -141,6 +147,26 @@ impl VfsState {
             if let Some(data) = dm.read_device(&desc.path, desc.offset, size) {
                 desc.offset += data.len();
                 return Ok(data);
+            }
+        }
+
+        if desc.path.starts_with("/mnt/ext2/") {
+            if let Some(ref ext2) = self.ext2_fs {
+                let rel_path = &desc.path["/mnt/ext2/".len()..];
+                if let Some(inode_num) = ext2.resolve_path(rel_path, dm) {
+                    if let Some(inode) = ext2.get_inode(inode_num, dm) {
+                        if (inode.i_mode & 0xF000) != 0x4000 {
+                            let file_data = ext2.read_inode_data(&inode, dm);
+                            if desc.offset >= file_data.len() {
+                                return Ok(Vec::new()); // EOF
+                            }
+                            let limit = core::cmp::min(desc.offset + size, file_data.len());
+                            let data = file_data[desc.offset..limit].to_vec();
+                            desc.offset += data.len();
+                            return Ok(data);
+                        }
+                    }
+                }
             }
         }
 
