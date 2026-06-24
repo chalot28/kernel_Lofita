@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .name = "lorifa_kernel",
         .root_module = kernel_mod,
     });
+    kernel_mod.addAssemblyFile(b.path("boot/multiboot.s"));
 
     // Use our custom linker script to place the kernel at 0x100000
     kernel.setLinkerScript(b.path("kernel.ld"));
@@ -57,8 +58,8 @@ pub fn build(b: *std.Build) void {
     const mkdir_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         "mkdir -p " ++ iso_dir ++ "/boot/grub && " ++
-        "cp zig-out/bin/lorifa_kernel " ++ iso_dir ++ "/boot/lorifa_kernel.elf && " ++
-        "cp iso/boot/grub/grub.cfg " ++ iso_dir ++ "/boot/grub/grub.cfg",
+            "cp zig-out/bin/lorifa_kernel " ++ iso_dir ++ "/boot/lorifa_kernel.elf && " ++
+            "cp iso/boot/grub/grub.cfg " ++ iso_dir ++ "/boot/grub/grub.cfg",
     });
     mkdir_cmd.step.dependOn(b.getInstallStep());
 
@@ -77,10 +78,12 @@ pub fn build(b: *std.Build) void {
     // -----------------------------------------------------------------------
     const qemu_cmd = b.addSystemCommand(&.{
         "qemu-system-x86_64",
-        "-cdrom",     "lofita.iso",
-        "-m",         "256M",
-        "-serial",    "stdio",       // Serial output goes to terminal
-        "-display",   "sdl",         // VGA window (change to "none" for headless)
+        "-cdrom",
+        "lofita.iso",
+        "-m",
+        "256M",
+        "-serial", "stdio", // Serial output goes to terminal
+        "-display",   "sdl", // VGA window (change to "none" for headless)
         "-no-reboot",
     });
     qemu_cmd.step.dependOn(&grub_cmd.step);

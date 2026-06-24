@@ -19,6 +19,8 @@
 
 const vga = @import("../../../drivers/vga.zig");
 const gdt = @import("gdt.zig");
+const pic = @import("../../../drivers/pic.zig");
+const keyboard = @import("../../../drivers/keyboard.zig");
 
 // ---------------------------------------------------------------------------
 // IDT entry (16 bytes, packed)
@@ -112,43 +114,43 @@ fn isr_stub_no_err(comptime handler_fn: anytype) fn () callconv(.naked) void {
     return struct {
         fn stub() callconv(.naked) void {
             asm volatile (
-                \\ pushq $0          /* dummy error code */
-                \\ pushq %rax
-                \\ pushq %rbx
-                \\ pushq %rcx
-                \\ pushq %rdx
-                \\ pushq %rsi
-                \\ pushq %rdi
-                \\ pushq %rbp
-                \\ pushq %r8
-                \\ pushq %r9
-                \\ pushq %r10
-                \\ pushq %r11
-                \\ pushq %r12
-                \\ pushq %r13
-                \\ pushq %r14
-                \\ pushq %r15
+                \\ pushq $0
+                \\ pushq %%rax
+                \\ pushq %%rbx
+                \\ pushq %%rcx
+                \\ pushq %%rdx
+                \\ pushq %%rsi
+                \\ pushq %%rdi
+                \\ pushq %%rbp
+                \\ pushq %%r8
+                \\ pushq %%r9
+                \\ pushq %%r10
+                \\ pushq %%r11
+                \\ pushq %%r12
+                \\ pushq %%r13
+                \\ pushq %%r14
+                \\ pushq %%r15
                 \\ cld
-                \\ movq  %rsp, %rdi  /* arg0 = *TrapFrame */
-                \\ subq  $8, %rsp    /* 16-byte stack alignment */
+                \\ movq  %%rsp, %%rdi
+                \\ subq  $8, %%rsp
                 \\ callq *%[handler_fn]
-                \\ addq  $8, %rsp
-                \\ popq  %r15
-                \\ popq  %r14
-                \\ popq  %r13
-                \\ popq  %r12
-                \\ popq  %r11
-                \\ popq  %r10
-                \\ popq  %r9
-                \\ popq  %r8
-                \\ popq  %rbp
-                \\ popq  %rdi
-                \\ popq  %rsi
-                \\ popq  %rdx
-                \\ popq  %rcx
-                \\ popq  %rbx
-                \\ popq  %rax
-                \\ addq  $8, %rsp    /* discard dummy error code */
+                \\ addq  $8, %%rsp
+                \\ popq  %%r15
+                \\ popq  %%r14
+                \\ popq  %%r13
+                \\ popq  %%r12
+                \\ popq  %%r11
+                \\ popq  %%r10
+                \\ popq  %%r9
+                \\ popq  %%r8
+                \\ popq  %%rbp
+                \\ popq  %%rdi
+                \\ popq  %%rsi
+                \\ popq  %%rdx
+                \\ popq  %%rcx
+                \\ popq  %%rbx
+                \\ popq  %%rax
+                \\ addq  $8, %%rsp
                 \\ iretq
                 :
                 : [handler_fn] "r" (&handler_fn),
@@ -162,43 +164,42 @@ fn isr_stub_with_err(comptime handler_fn: anytype) fn () callconv(.naked) void {
     return struct {
         fn stub() callconv(.naked) void {
             asm volatile (
-                \\ /* error code already on stack from CPU */
-                \\ pushq %rax
-                \\ pushq %rbx
-                \\ pushq %rcx
-                \\ pushq %rdx
-                \\ pushq %rsi
-                \\ pushq %rdi
-                \\ pushq %rbp
-                \\ pushq %r8
-                \\ pushq %r9
-                \\ pushq %r10
-                \\ pushq %r11
-                \\ pushq %r12
-                \\ pushq %r13
-                \\ pushq %r14
-                \\ pushq %r15
+                \\ pushq %%rax
+                \\ pushq %%rbx
+                \\ pushq %%rcx
+                \\ pushq %%rdx
+                \\ pushq %%rsi
+                \\ pushq %%rdi
+                \\ pushq %%rbp
+                \\ pushq %%r8
+                \\ pushq %%r9
+                \\ pushq %%r10
+                \\ pushq %%r11
+                \\ pushq %%r12
+                \\ pushq %%r13
+                \\ pushq %%r14
+                \\ pushq %%r15
                 \\ cld
-                \\ movq  %rsp, %rdi  /* arg0 = *TrapFrame */
-                \\ subq  $8, %rsp
+                \\ movq  %%rsp, %%rdi
+                \\ subq  $8, %%rsp
                 \\ callq *%[handler_fn]
-                \\ addq  $8, %rsp
-                \\ popq  %r15
-                \\ popq  %r14
-                \\ popq  %r13
-                \\ popq  %r12
-                \\ popq  %r11
-                \\ popq  %r10
-                \\ popq  %r9
-                \\ popq  %r8
-                \\ popq  %rbp
-                \\ popq  %rdi
-                \\ popq  %rsi
-                \\ popq  %rdx
-                \\ popq  %rcx
-                \\ popq  %rbx
-                \\ popq  %rax
-                \\ addq  $8, %rsp    /* discard CPU-pushed error code */
+                \\ addq  $8, %%rsp
+                \\ popq  %%r15
+                \\ popq  %%r14
+                \\ popq  %%r13
+                \\ popq  %%r12
+                \\ popq  %%r11
+                \\ popq  %%r10
+                \\ popq  %%r9
+                \\ popq  %%r8
+                \\ popq  %%rbp
+                \\ popq  %%rdi
+                \\ popq  %%rsi
+                \\ popq  %%rdx
+                \\ popq  %%rcx
+                \\ popq  %%rbx
+                \\ popq  %%rax
+                \\ addq  $8, %%rsp
                 \\ iretq
                 :
                 : [handler_fn] "r" (&handler_fn),
@@ -340,6 +341,35 @@ extern fn rust_syscall_dispatch(
 ) i64;
 
 // ---------------------------------------------------------------------------
+// Hardware IRQ handlers
+// ---------------------------------------------------------------------------
+
+/// Generic IRQ handler for master PIC IRQs (vectors 0x20-0x27).
+pub fn handle_master_irq(frame: *TrapFrame) callconv(.c) void {
+    _ = frame;
+    pic.eoi_master();
+}
+
+/// Generic IRQ handler for slave PIC IRQs (vectors 0x28-0x2F).
+pub fn handle_slave_irq(frame: *TrapFrame) callconv(.c) void {
+    _ = frame;
+    pic.eoi_slave();
+}
+
+/// PIT timer interrupt handler (IRQ0 → vector 0x20).
+pub fn handle_timer_irq(frame: *TrapFrame) callconv(.c) void {
+    _ = frame;
+    // TODO: scheduler tick in future phases
+    pic.eoi_master();
+}
+
+/// Keyboard interrupt handler (IRQ1 → vector 0x21).
+pub fn handle_keyboard_irq(frame: *TrapFrame) callconv(.c) void {
+    _ = frame;
+    keyboard.handle_keyboard_interrupt();
+}
+
+// ---------------------------------------------------------------------------
 // Stub instances
 // ---------------------------------------------------------------------------
 
@@ -349,6 +379,12 @@ const stub_double_fault = isr_stub_with_err(handle_double_fault);
 const stub_gpf = isr_stub_with_err(handle_gpf);
 const stub_page_fault = isr_stub_with_err(handle_page_fault);
 const stub_syscall_int80 = isr_stub_no_err(handle_syscall_int80);
+
+// --- IRQ stubs ---
+const stub_irq_master = isr_stub_no_err(handle_master_irq);
+const stub_irq_slave = isr_stub_no_err(handle_slave_irq);
+const stub_irq_timer = isr_stub_no_err(handle_timer_irq);
+const stub_irq_keyboard = isr_stub_no_err(handle_keyboard_irq);
 
 // ---------------------------------------------------------------------------
 // Public init
@@ -370,23 +406,41 @@ pub fn idt_init() void {
     // --- Linux syscall compatibility gate (DPL=3 so userspace can call) ---
     idt_entries[128] = make_gate(@intFromPtr(&stub_syscall_int80), gdt.KERNEL_CODE_SEL, 0, 0xEE);
 
+    // --- Hardware IRQs (vectors 0x20-0x2F) ---
+    // Master PIC IRQs: vectors 0x20-0x27
+    // Slave  PIC IRQs: vectors 0x28-0x2F
+    idt_entries[0x20] = make_gate(@intFromPtr(&stub_irq_timer), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ0  (PIT)
+    idt_entries[0x21] = make_gate(@intFromPtr(&stub_irq_keyboard), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ1  (Keyboard)
+    idt_entries[0x22] = make_gate(@intFromPtr(&stub_irq_master), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ2  (Cascade)
+    idt_entries[0x23] = make_gate(@intFromPtr(&stub_irq_master), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ3  (COM2)
+    idt_entries[0x24] = make_gate(@intFromPtr(&stub_irq_master), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ4  (COM1)
+    idt_entries[0x25] = make_gate(@intFromPtr(&stub_irq_master), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ5  (LPT2)
+    idt_entries[0x26] = make_gate(@intFromPtr(&stub_irq_master), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ6  (Floppy)
+    idt_entries[0x27] = make_gate(@intFromPtr(&stub_irq_master), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ7  (Spurious)
+    idt_entries[0x28] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ8  (RTC)
+    idt_entries[0x29] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ9
+    idt_entries[0x2A] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ10
+    idt_entries[0x2B] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ11
+    idt_entries[0x2C] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ12 (Mouse)
+    idt_entries[0x2D] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ13 (FPU)
+    idt_entries[0x2E] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ14 (ATA pri)
+    idt_entries[0x2F] = make_gate(@intFromPtr(&stub_irq_slave), gdt.KERNEL_CODE_SEL, 0, 0x8E); // IRQ15 (ATA sec)
+
     idt_ptr.limit = @intCast(idt_entries.len * @sizeOf(IdtEntry) - 1);
     idt_ptr.base = @intFromPtr(&idt_entries);
 
     // --- Load the IDT into the CPU ---
-    asm volatile ("lidt (%[ptr])"
+    asm volatile (
+        \\ movq %[ptr], %%rdi
+        \\ lidtq (%%rdi)
         :
         : [ptr] "r" (&idt_ptr),
-        : .{ .memory = true });
+        : .{ .rdi = true, .memory = true });
 
-    // --- Enable hardware interrupts ---
-    // DISABLED for now: the PIC is not yet configured, so the PIT timer IRQ0
-    // (vector 32 by default) would immediately fire and cause a cascade:
-    //   no handler → #NP (vector 11) → no handler → #DF → halt.
-    // PIC + IRQ handlers will be enabled together in a later phase.
-    // asm volatile ("sti");
+    // --- DO NOT enable interrupts here — PIC + keyboard must be initialized first ---
+    // Interrupts are enabled in kernel_main() after all init is done.
 
     vga.set_color(.Green, .Black);
-    vga.print("[IDT] Loaded — exceptions + int 0x80 syscall gate active.\n");
+    vga.print("[IDT] Loaded — exceptions, IRQs (0x20-0x2F), and int 0x80 active.\n");
     vga.set_color(.White, .Black);
 }

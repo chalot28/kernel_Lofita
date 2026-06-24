@@ -170,10 +170,12 @@ fn ensure_table(entry: *u64) !*RawTable {
 
 /// Invalidate a single TLB entry.
 inline fn invlpg(vaddr: u64) void {
-    asm volatile ("invlpg (%[addr])"
+    asm volatile (
+        \\ movq %[addr], %%rdi
+        \\ invlpg (%%rdi)
         :
-        : [addr] "r" (vaddr),
-        : .{ .memory = true });
+        : [addr] "r" (@as(*const u64, @ptrFromInt(vaddr))),
+        : .{ .rdi = true, .memory = true });
 }
 
 // ---------------------------------------------------------------------------

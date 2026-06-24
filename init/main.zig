@@ -10,18 +10,14 @@
 //
 // This function must NEVER return. If it does, the boot stub halts the CPU.
 
-// Pull in the boot stub so its .multiboot section and _start symbol are
-// included in the final binary. Without this, the linker will not include
-// the Multiboot2 header and GRUB will refuse to load the kernel.
-comptime {
-    _ = @import("../boot/multiboot.zig");
-}
-
-const vga    = @import("../drivers/vga.zig");
-const gdt    = @import("../arch/x86_64/kernel/gdt.zig");
-const idt    = @import("../arch/x86_64/kernel/idt.zig");
-const ppa    = @import("../mm/ppa.zig");
+const vga = @import("../drivers/vga.zig");
+const gdt = @import("../arch/x86_64/kernel/gdt.zig");
+const idt = @import("../arch/x86_64/kernel/idt.zig");
+const ppa = @import("../mm/ppa.zig");
 const paging = @import("../arch/x86_64/mm/paging.zig");
+const pic = @import("../drivers/pic.zig");
+const keyboard = @import("../drivers/keyboard.zig");
+const shell = @import("../kernel/shell.zig");
 
 /// Called by Rust after all Rust-side kernel subsystems are initialized.
 /// Declared here so the Rust crate can call it via FFI.
@@ -82,14 +78,34 @@ pub export fn kernel_main() noreturn {
     // -----------------------------------------------------------------------
     vga.set_color(.LightGreen, .Black);
     vga.print("\n[init] *** Lofita Kernel loaded successfully. ***\n");
-    vga.print("[init] CPU halting in idle loop. Press any key in QEMU.\n");
     vga.set_color(.White, .Black);
 
     // -----------------------------------------------------------------------
-    // Idle loop — a real kernel would context-switch here.
-    // In Phase 2 this will dispatch to the scheduler.
+    // 7. PIC 8259A — initialise and remap IRQs to vectors 0x20-0x2F
     // -----------------------------------------------------------------------
-    while (true) {
-        asm volatile ("hlt"); // Sleep until next interrupt
-    }
+    vga.print("[init] Initializing PIC...\n");
+    pic.pic_init();
+
+    // -----------------------------------------------------------------------
+    // 8. PS/2 Keyboard — initialise controller and enable IRQ1
+    // -----------------------------------------------------------------------
+    vga.print("[init] Initializing Keyboard...\n");
+    keyboard.keyboard_init();
+
+    // -----------------------------------------------------------------------
+    // 9. Enable hardware interrupts
+    // -----------------------------------------------------------------------
+    vga.print("[init] Enabling interrupts...\n");
+    asm volatile ("sti");
+
+    // -----------------------------------------------------------------------
+    // 10. Interactive Terminal Shell
+    // -----------------------------------------------------------------------
+    vga.set_color(.LightGreen, .Black);
+    vga.print("[init] Entering interactive shell. Type 'help' for commands.\n");
+    vga.set_color(.White, .Black);
+
+    shell.shell_main();
+
+    // Never reached
 }
