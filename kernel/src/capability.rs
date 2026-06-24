@@ -1,8 +1,10 @@
 // kernel/src/capability.rs
-// Written in Rust
+// Written in Rust (no_std)
 // Core Capability definitions and Privilege checks.
 
-bitflags::bitflags! {
+use bitflags::bitflags;
+
+bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Capability: u32 {
         const NONE         = 0;
@@ -20,8 +22,8 @@ bitflags::bitflags! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivilegeLevel {
-    Root = 0,
-    Admin = 1,
-    User = 2,
+    Root    = 0,
+    Admin   = 1,
+    User    = 2,
     Process = 3,
 }

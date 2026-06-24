@@ -3,7 +3,7 @@
 // Translation of Linux memory management syscalls.
 
 extern "C" {
-    pub fn rust_allocate_memory(token_id: u64, size: usize) -> usize;
+    pub fn rust_allocate_memory(token_id: u64, size: usize, is_writeable: bool, is_executable: bool) -> usize;
 }
 
 pub struct MemorySyscalls {
@@ -29,7 +29,7 @@ impl MemorySyscalls {
         if new_brk > self.heap_limit {
             let needed = (new_brk - self.heap_limit) as usize;
             let allocated = unsafe {
-                rust_allocate_memory(token_id, needed)
+                rust_allocate_memory(token_id, needed, true, false)
             };
             if allocated == 0 {
                 return -12; // -ENOMEM
@@ -42,7 +42,7 @@ impl MemorySyscalls {
 
     pub fn sys_mmap(&mut self, token_id: u64, length: u64) -> i64 {
         let allocated = unsafe {
-            rust_allocate_memory(token_id, length as usize)
+            rust_allocate_memory(token_id, length as usize, true, false)
         };
         if allocated == 0 {
             -12 // -ENOMEM

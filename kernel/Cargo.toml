@@ -3,10 +3,39 @@ name = "lorifa_kernel_core"
 version = "0.1.0"
 edition = "2021"
 
+# ─── Library configuration ────────────────────────────────────────────────────
 [lib]
 name = "lorifa_kernel_core"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# staticlib: linked into the Zig kernel ELF
+# rlib: allows other Rust crates to depend on this (e.g. compat/linux)
+crate-type = ["staticlib", "rlib"]
 
+# ─── Build profiles ───────────────────────────────────────────────────────────
+[profile.release]
+panic = "abort"     # No stack unwinding — we write our own panic handler
+opt-level = 2
+lto = true          # Link-time optimization → smaller binary
+codegen-units = 1   # Better inlining across modules
+overflow-checks = false  # No std runtime = no overflow panic infrastructure
+
+[profile.dev]
+panic = "abort"
+
+# ─── Dependencies (all must support #![no_std]) ───────────────────────────────
 [dependencies]
-bitflags = "2.4"
-lazy_static = "1.4"
+
+# Bit-flag enums (already supports no_std via feature flag)
+bitflags = { version = "2.4", default-features = false }
+
+# Spinlock-based Mutex/RwLock that works without OS (replaces std::sync::Mutex)
+spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock", "once"] }
+
+# HashMap/HashSet backed by AHash (no_std, no global allocator for the hasher)
+hashbrown = { version = "0.14", default-features = false, features = ["ahash"] }
+
+# Heap allocator for bare-metal (provides GlobalAlloc impl over a static byte array)
+linked-list-allocator = { version = "0.10", default-features = false, features = ["const_mut_refs"] }
+
+# Safer integer handling (no_std)
+# (used for formatted output without std's fmt machinery)
+# No additional dependencies needed — we use core::fmt directly.

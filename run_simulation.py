@@ -543,7 +543,7 @@ class LorifaKernelSimulation:
         log_rust(f"Created Token {t_id} ('{name}', Privilege: {PrivilegeLevel.to_string(privilege)}, Caps: [{Capability.to_string(capabilities)}], Expiry: {lifetime_seconds}s)")
         return t_id
 
-    def allocate_memory(self, token_id, size):
+    def allocate_memory(self, token_id, size, is_writeable=True, is_executable=False):
         token = self.tokens.get(token_id)
         if not token:
             raise ValueError("Token not found")
@@ -555,8 +555,6 @@ class LorifaKernelSimulation:
             raise MemoryError(f"Memory limit exceeded for Token {token_id}")
 
         # Enforce W^X (Write XOR Execute) security policy
-        is_writeable = True
-        is_executable = False
         if is_writeable and is_executable:
             log_alert("Security Guard: W^X violation! Memory cannot be both Writeable and Executable.")
             raise PermissionError("W^X violation")

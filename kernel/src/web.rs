@@ -1,11 +1,20 @@
 // kernel/src/web.rs
-// Written in Rust
-// WebKit WebView Engine integration simulator.
+// Written in Rust (no_std)
+// WebKit WebView Engine integration (bare-metal stub).
+//
+// no_std changes:
+//   - String                        → alloc::string::String
+//   - println!                      → kprint!
+//   - std::slice::from_raw_parts    → core::slice::from_raw_parts
+//   - std::str::from_utf8           → core::str::from_utf8
+
+use alloc::string::{String, ToString};
+use crate::kprint;
 
 pub struct WebView {
-    pub url: String,
-    pub width: u32,
-    pub height: u32,
+    pub url:             String,
+    pub width:           u32,
+    pub height:          u32,
     pub fb_virtual_addr: usize,
 }
 
@@ -13,70 +22,55 @@ impl WebView {
     pub fn new(url: &str) -> Self {
         WebView {
             url: url.to_string(),
-            width: 1024,
+            width:  1024,
             height: 768,
             fb_virtual_addr: 0,
         }
     }
 
-    /// Request a framebuffer from the Virtual Address Space Manager
+    /// Request a framebuffer from the Virtual Address Space Manager.
     pub fn allocate_framebuffer(&mut self, has_mem_alloc: bool) -> Result<usize, &'static str> {
         if !has_mem_alloc {
-            return Err("WebKit Engine Error: Lacks MEM_ALLOC capability to allocate framebuffer.");
+            return Err("WebKit: Lacks MEM_ALLOC capability.");
         }
-
-        // 1024 * 768 * 4 bytes (32-bit color) = 3,145,728 bytes (~3MB)
-        let size = (self.width * self.height * 4) as usize;
-        
-        // In actual system, we request memory from KERNEL VASM
-        // For local simulation within the struct, we mock a virtual address:
-        let mock_fb_addr = 0xD0000000; 
+        let size          = (self.width * self.height * 4) as usize;
+        let mock_fb_addr  = 0xD000_0000usize;
         self.fb_virtual_addr = mock_fb_addr;
-        
-        println!(
-            "[WebKit] Framebuffer allocated. Size: {} bytes (~3MB). Virtual Address: 0x{:x}",
-            size, mock_fb_addr
-        );
+        kprint!("[WebKit] Framebuffer: {} bytes at 0x{:x}\n", size, mock_fb_addr);
         Ok(mock_fb_addr)
     }
 
-    /// Simulate parsing and rendering basic HTML DOM structure
+    /// Render stub — draws to VGA text buffer.
     pub fn render(&self) {
-        println!("\n[WebKit Engine] Rendering: {}...", self.url);
-        println!("+-------------------------------------------------------------+");
-        println!("| [WebKit WebView]                                            |");
-        println!("|                                                             |");
-        if self.url.contains("google.com") {
-            println!("|   Google Search Engine                                      |");
-            println!("|   [ Search Input: ____________________ ] [ Search Button ]  |");
-        } else if self.url.contains("lorifa.org") {
-            println!("|   Welcome to Lorifa Monolithic OS Project                   |");
-            println!("|   Active core: Zig PPA + Rust VASM + WebKit webview         |");
+        kprint!("[WebKit] Rendering: {}\n", self.url);
+        kprint!("+-----------------------------------+\n");
+        kprint!("| Lofita Web Browser                |\n");
+        if self.url.contains("lorifa.org") {
+            kprint!("| Welcome to Lofita OS Project      |\n");
         } else {
-            println!("|   Lorifa Web Browser - Loading...                           |");
-            println!("|   HTTP 200 OK: Content Loaded                               |");
+            kprint!("| Loading: {}    |\n", self.url);
         }
-        println!("|                                                             |");
-        println!("+-------------------------------------------------------------+");
+        kprint!("+-----------------------------------+\n");
     }
 }
 
-// FFI bindings
+// ---------------------------------------------------------------------------
+// C-ABI FFI export
+// ---------------------------------------------------------------------------
 
 #[no_mangle]
 pub extern "C" fn rust_webkit_render(
-    url_ptr: *const u8,
-    url_len: usize,
+    url_ptr:       *const u8,
+    url_len:       usize,
     has_mem_alloc: u32,
 ) -> i32 {
-    let url_slice = unsafe { std::slice::from_raw_parts(url_ptr, url_len) };
-    let url = std::str::from_utf8(url_slice).unwrap_or("about:blank");
-    
+    let url_slice = unsafe { core::slice::from_raw_parts(url_ptr, url_len) };
+    let url       = core::str::from_utf8(url_slice).unwrap_or("about:blank");
+
     let mut webview = WebView::new(url);
     if webview.allocate_framebuffer(has_mem_alloc != 0).is_err() {
         return -1;
     }
-    
     webview.render();
-    0 // Success
+    0
 }

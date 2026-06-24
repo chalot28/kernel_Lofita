@@ -1,9 +1,17 @@
 // kernel/src/sched.rs
-// Written in Rust
+// Written in Rust (no_std)
 // Thread scheduling queues (READY, RUNNING, BLOCKED, ZOMBIE).
+//
+// no_std changes:
+//   - std::collections::VecDeque → alloc::collections::VecDeque
+//   - std::sync::{Arc, Mutex}   → alloc::sync::Arc + spin::Mutex
+//   - println!()                 → kprint! (VGA output via FFI)
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::string::{String, ToString};
+use spin::Mutex;
+use crate::kprint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadState {
@@ -15,26 +23,26 @@ pub enum ThreadState {
 
 #[derive(Debug, Default, Clone)]
 pub struct RegistersContext {
-    pub rip: u64,
-    pub rsp: u64,
-    pub rbp: u64,
+    pub rip:    u64,
+    pub rsp:    u64,
+    pub rbp:    u64,
     pub rflags: u64,
-    pub rax: u64,
-    pub rdi: u64,
-    pub rsi: u64,
+    pub rax:    u64,
+    pub rdi:    u64,
+    pub rsi:    u64,
 }
 
 pub struct Thread {
-    pub id: u32,
+    pub id:         u32,
     pub session_id: u64,
-    pub name: String,
-    pub state: ThreadState,
-    pub context: RegistersContext,
+    pub name:       String,
+    pub state:      ThreadState,
+    pub context:    RegistersContext,
 }
 
 pub struct Scheduler {
-    pub threads: VecDeque<Arc<Mutex<Thread>>>,
-    pub next_thread_id: u32,
+    pub threads:         VecDeque<Arc<Mutex<Thread>>>,
+    pub next_thread_id:  u32,
 }
 
 impl Scheduler {
@@ -51,7 +59,7 @@ impl Scheduler {
 
         let mut context = RegistersContext::default();
         context.rip = entry_point;
-        context.rsp = 0x7FFFFFFF0000;
+        context.rsp = 0x7FFFFFFF0000; // Default user stack top
 
         let thread = Arc::new(Mutex::new(Thread {
             id: t_id,
@@ -62,7 +70,7 @@ impl Scheduler {
         }));
 
         self.threads.push_back(thread);
-        println!("[Scheduler] Spawned Thread {} ('{}') for Session {}", t_id, name, session_id);
+        kprint!("[Scheduler] Spawned Thread {} for Session {}\n", t_id, session_id);
         t_id
     }
 
@@ -73,16 +81,12 @@ impl Scheduler {
 
         for _ in 0..self.threads.len() {
             let thread_arc = self.threads.pop_front()?;
-            let mut thread = thread_arc.lock().unwrap();
+            let mut thread = thread_arc.lock();
 
             if thread.state == ThreadState::Ready {
                 thread.state = ThreadState::Running;
-                println!(
-                    "[Scheduler] Context Switch -> Running Thread {} ('{}') [rip: 0x{:x}]",
-                    thread.id, thread.name, thread.context.rip
-                );
-                
-                thread.state = ThreadState::Ready;
+                kprint!("[Scheduler] Context Switch -> Thread {}\n", thread.id);
+                thread.state = ThreadState::Ready; // Preempted — back to ready
                 drop(thread);
                 self.threads.push_back(Arc::clone(&thread_arc));
                 return Some(thread_arc);
@@ -96,13 +100,13 @@ impl Scheduler {
 
     pub fn terminate_thread(&mut self, thread_id: u32) {
         for t_arc in &self.threads {
-            let mut t = t_arc.lock().unwrap();
+            let mut t = t_arc.lock();
             if t.id == thread_id {
                 t.state = ThreadState::Zombie;
             }
         }
         self.threads.retain(|t_arc| {
-            let t = t_arc.lock().unwrap();
+            let t = t_arc.lock();
             t.state != ThreadState::Zombie
         });
     }
