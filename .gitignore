@@ -1,0 +1,46 @@
+# Lorifa OS - Git Ignore Config
+# Prevents leaking local credentials, IDE metadata, and build artifacts.
+
+# Rust / Cargo artifacts
+target/
+**/target/
+Cargo.lock
+
+# Zig build outputs and cache
+zig-cache/
+zig-out/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+lorifa_monolithic_kernel
+
+# Python cache & virtualenvs
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# IDE specific settings (Vscode, Jetbrains)
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Advanced Agentic Coding (Antigravity / Gemini) metadata
+.agents/
+.gemini/
+.securecoder/
+*.log
+
+# Secrets and local configurations
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.secret
+*.pem
+*.key
+*.pub
