@@ -265,3 +265,11 @@ pub export fn page_table_unmap(virtual_addr: usize) void {
         ctx.unmap(virtual_addr);
     }
 }
+
+/// Switch the active page directory (CR3) to a new physical address.
+pub export fn switch_page_directory(phys_addr: usize) callconv(.c) void {
+    asm volatile ("movq %[cr3], %%cr3"
+        :
+        : [cr3] "r" (@as(u64, phys_addr)),
+        : .{ .memory = true });
+}

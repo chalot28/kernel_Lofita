@@ -269,6 +269,8 @@ pub fn handle_gpf(frame: *TrapFrame) callconv(.c) void {
     }
 }
 
+extern fn vasm_handle_page_fault(fault_addr: usize, error_code: u32) bool;
+
 /// #PF — Page Fault (vector 14, has error code = access flags)
 pub fn handle_page_fault(frame: *TrapFrame) callconv(.c) void {
     var cr2: u64 = 0;
@@ -303,7 +305,16 @@ pub fn handle_page_fault(frame: *TrapFrame) callconv(.c) void {
     vga.print_hex(frame.rsp);
     vga.print("\n");
     vga.set_color(.White, .Black);
-    // TODO: in Phase 3 this will trigger ELF demand-paging
+    // Try to resolve via Demand Paging (Phase 3)
+    if (vasm_handle_page_fault(@intCast(cr2), @intCast(frame.error_code))) {
+        vga.set_color(.LightGreen, .Black);
+        vga.print("[#PF] Handled successfully by VASM.\n");
+        vga.set_color(.White, .Black);
+        return;
+    }
+
+    vga.set_color(.LightRed, .Black);
+    vga.print("[#PF] Unhandled Page Fault! Halting CPU.\n");
     while (true) {
         asm volatile ("hlt");
     }
@@ -356,10 +367,11 @@ pub fn handle_slave_irq(frame: *TrapFrame) callconv(.c) void {
     pic.eoi_slave();
 }
 
+extern fn rust_kernel_tick(frame: *TrapFrame) void;
+
 /// PIT timer interrupt handler (IRQ0 → vector 0x20).
 pub fn handle_timer_irq(frame: *TrapFrame) callconv(.c) void {
-    _ = frame;
-    // TODO: scheduler tick in future phases
+    rust_kernel_tick(frame);
     pic.eoi_master();
 }
 

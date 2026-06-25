@@ -15,6 +15,7 @@ pub mod capability;
 pub mod token;
 pub mod session;
 pub mod sched;
+pub mod elf_loader;
 pub mod vasm;
 pub mod vfs;
 pub mod ipc;
@@ -26,7 +27,7 @@ pub mod fs;
 use alloc::sync::Arc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::mem;
+
 use spin::Mutex;
 use hashbrown::HashMap;
 
@@ -189,7 +190,8 @@ pub extern "C" fn rust_kernel_init() {
         privilege:     PrivilegeLevel::Root,
         parent:        None,
         children:      Vec::new(),
-        vmas:          Vec::new(),
+        vmas:          alloc::collections::BTreeMap::new(),
+        pml4_phys_addr: 0,
         memory_limit:  usize::MAX,
         memory_used:   0,
         is_permanent:  true,
@@ -287,7 +289,8 @@ pub extern "C" fn rust_create_child_token(
         privilege,
         parent:        parent_weak,
         children:      Vec::new(),
-        vmas:          Vec::new(),
+        vmas:          alloc::collections::BTreeMap::new(),
+        pml4_phys_addr: 0,
         memory_limit:  mem_limit,
         memory_used:   0,
         is_permanent:  false,
@@ -384,7 +387,7 @@ pub extern "C" fn rust_allocate_memory(
         }
     }
 
-    token.vmas.push(Vma {
+    token.vmas.insert(virtual_addr, Vma {
         start_addr:    virtual_addr,
         size:          actual_size,
         is_writeable,
@@ -556,9 +559,19 @@ pub extern "C" fn rust_ipc_recv(port_id: u32, receiver_thread_id: u32) -> i32 {
     }
 }
 
+#[repr(C)]
+pub struct TrapFrame {
+    pub r15: u64, pub r14: u64, pub r13: u64, pub r12: u64,
+    pub r11: u64, pub r10: u64, pub r9:  u64, pub r8:  u64,
+    pub rbp: u64, pub rdi: u64, pub rsi: u64, pub rdx: u64,
+    pub rcx: u64, pub rbx: u64, pub rax: u64,
+    pub error_code: u64,
+    pub rip: u64, pub cs:  u64, pub rflags: u64, pub rsp: u64, pub ss:  u64,
+}
+
 /// Called from the timer interrupt handler (IDT vector 32).
 #[no_mangle]
-pub extern "C" fn rust_kernel_tick() {
+pub extern "C" fn rust_kernel_tick(frame: *mut TrapFrame) {
     let mut state = kernel().lock();
     state.tick_count += 1;
     let current_tick = state.tick_count;
@@ -575,8 +588,8 @@ pub extern "C" fn rust_kernel_tick() {
         kprint!("[kernel/rust] Token {} expired.\n", t_id);
         if let Some(token_arc) = state.tokens.remove(&t_id) {
             let mut token = token_arc.lock();
-            let vmas      = mem::take(&mut token.vmas);
-            for vma in vmas {
+            let vmas = core::mem::take(&mut token.vmas);
+            for (_, vma) in vmas.iter() {
                 let pages = vma.size / 4096;
                 for i in 0..pages {
                     unsafe { page_table_unmap(vma.start_addr + i * 4096); }
@@ -586,7 +599,23 @@ pub extern "C" fn rust_kernel_tick() {
         }
     }
 
-    state.scheduler.schedule_next();
+    if let Some(thread_arc) = state.scheduler.schedule_next() {
+        let thread = thread_arc.lock();
+        if let Some(session) = state.sessions.get_mut(&thread.session_id) {
+            session.activate(); // Switches CR3!
+        }
+        
+        // Populate TrapFrame for IRETQ to jump to ring 3
+        if !frame.is_null() {
+            unsafe {
+                (*frame).rip = thread.context.rip;
+                (*frame).rsp = thread.context.rsp;
+                (*frame).cs = thread.context.cs;
+                (*frame).ss = thread.context.ss;
+                (*frame).rflags = thread.context.rflags;
+            }
+        }
+    }
 }
 
 /// Entry point for Linux-compat syscall routing (called from IDT int 0x80 handler).
@@ -608,9 +637,99 @@ pub extern "C" fn rust_syscall_dispatch(
             kprint!("[syscall] Process exit({}).\n", a1);
             -1
         }
+        59 => {
+            // sys_execve
+            kprint!("[syscall] sys_execve: path=0x{:x}\n", a1);
+            -38
+        }
         nr => {
             kprint!("[syscall] Unhandled syscall #{}\n", nr);
             -38 // ENOSYS
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rust_spawn_process(path_ptr: *const u8, path_len: usize) {
+    let mut state = kernel().lock();
+    let path = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(path_ptr, path_len)) };
+    
+    let mut data = alloc::vec::Vec::new();
+    if let Some(ext2) = &state.vfs.ext2_fs {
+        if let Some(inode_idx) = ext2.resolve_path(path, &state.driver) {
+            if let Some(inode) = ext2.get_inode(inode_idx, &state.driver) {
+                data = ext2.read_inode_data(&inode, &state.driver);
+            }
+        }
+    }
+    
+    if data.is_empty() {
+        kprint!("[kernel] rust_spawn_process: File not found or empty: {}\n", path);
+        return;
+    }
+    
+    // We must temporarily activate the root token's session to map memory into its space.
+    // Wait, we should create a new token and session!
+    // For simplicity, we just use session 1 for the first process
+    if !state.sessions.contains_key(&1) {
+        use crate::token::Token;
+        use crate::session::Session;
+        use crate::vasm::phys_alloc;
+        
+        let mut token = Token {
+            id: 1,
+            name: alloc::string::String::from(path),
+            privilege: crate::capability::PrivilegeLevel::Process,
+            parent: Some(alloc::sync::Arc::downgrade(state.tokens.get(&0).unwrap())),
+            children: alloc::vec::Vec::new(),
+            vmas: alloc::collections::BTreeMap::new(),
+            pml4_phys_addr: 0,
+            memory_limit: 64 * 1024 * 1024,
+            memory_used: 0,
+            is_permanent: false,
+            expiry_tick: state.tick_count + 1000000,
+            capabilities: crate::capability::Capability::MEM_ALLOC | crate::capability::Capability::FS_READ,
+            run_count: 0,
+            is_deprecated: false,
+        };
+        let pml4 = unsafe { phys_alloc(1) };
+        token.pml4_phys_addr = pml4 as usize;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                state.tokens.get(&0).unwrap().lock().pml4_phys_addr as *const u8,
+                pml4,
+                4096
+            );
+        }
+        
+        let token_arc = alloc::sync::Arc::new(spin::Mutex::new(token));
+        state.tokens.insert(1, token_arc.clone());
+        let session = Session {
+            id: 1,
+            token: token_arc,
+            expiry_tick: state.tick_count + 1000000,
+            is_active: false,
+        };
+        state.sessions.insert(1, session);
+    }
+    
+    // Activate the session so mappings go into the right PML4
+    if let Some(session) = state.sessions.get_mut(&1) {
+        session.activate();
+    }
+    
+    match crate::elf_loader::load_elf(&data) {
+        Ok(proc) => {
+            let t_id = state.scheduler.spawn(1, path, proc.entry_point);
+            kprint!("[kernel] Spawned User Process '{}' at thread {} (Entry: 0x{:x})\n", path, t_id, proc.entry_point);
+            
+            // Set initial stack pointer for the newly spawned thread
+            let thread_arc = state.scheduler.threads.back().unwrap().clone();
+            let mut thread = thread_arc.lock();
+            thread.context.rsp = proc.initial_rsp;
+        }
+        Err(e) => {
+            kprint!("[kernel] ELF parsing failed: {:?}\n", e);
         }
     }
 }

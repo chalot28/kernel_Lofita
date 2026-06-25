@@ -13,6 +13,7 @@ const ata = @import("../drivers/ata.zig");
 // Rust FFI functions for shell commands
 extern fn rust_vfs_list_print(path_ptr: [*]const u8, path_len: usize) void;
 extern fn rust_vfs_cat_print(path_ptr: [*]const u8, path_len: usize) void;
+extern fn rust_spawn_process(path_ptr: [*]const u8, path_len: usize) void;
 
 // ---------------------------------------------------------------------------
 // Line-editing buffer
@@ -39,6 +40,7 @@ fn cmd_help() void {
     vga.print("  diskinfo              Read sector 0 of ATA drive\n");
     vga.print("  ls <path>             List directory contents\n");
     vga.print("  cat <path>            Print file contents\n");
+    vga.print("  exec <path>           Execute an ELF binary\n");
     vga.print("  echo <text>           Echo text back to the terminal\n");
     vga.print("  reboot                Halt the system\n");
     vga.set_color(.White, .Black);
@@ -119,6 +121,14 @@ fn cmd_cat(args: []const u8) void {
     rust_vfs_cat_print(args.ptr, args.len);
 }
 
+fn cmd_exec(args: []const u8) void {
+    if (args.len == 0) {
+        vga.print("Usage: exec <path>\n");
+        return;
+    }
+    rust_spawn_process(args.ptr, args.len);
+}
+
 // ---------------------------------------------------------------------------
 // Simple command tokenizer
 // ---------------------------------------------------------------------------
@@ -152,6 +162,8 @@ fn execute_line(line: []const u8) void {
         cmd_ls(args);
     } else if (eq(cmd, "cat")) {
         cmd_cat(args);
+    } else if (eq(cmd, "exec")) {
+        cmd_exec(args);
     } else if (eq(cmd, "echo")) {
         cmd_echo(args);
     } else if (eq(cmd, "reboot") or eq(cmd, "exit")) {

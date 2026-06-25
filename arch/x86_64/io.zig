@@ -28,6 +28,21 @@ pub inline fn inw(port: u16) u16 {
     );
 }
 
+pub inline fn outl(port: u16, val: u32) void {
+    asm volatile ("outl %[val], %[port]"
+        :
+        : [val] "{eax}" (val),
+          [port] "{dx}" (port),
+    );
+}
+
+pub inline fn inl(port: u16) u32 {
+    return asm volatile ("inl %[port], %[result]"
+        : [result] "={eax}" (-> u32),
+        : [port] "{dx}" (port),
+    );
+}
+
 pub inline fn io_wait() void {
     outb(0x80, 0);
 }

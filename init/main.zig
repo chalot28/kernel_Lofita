@@ -18,6 +18,7 @@ const paging = @import("../arch/x86_64/mm/paging.zig");
 const pic = @import("../drivers/pic.zig");
 const keyboard = @import("../drivers/keyboard.zig");
 const ata = @import("../drivers/ata.zig");
+const pci = @import("../drivers/pci.zig");
 const shell = @import("../kernel/shell.zig");
 
 /// Called by Rust after all Rust-side kernel subsystems are initialized.
@@ -73,6 +74,11 @@ pub export fn kernel_main() noreturn {
     // -----------------------------------------------------------------------
     vga.print("[init] Initializing ATA Storage...\n");
     ata.ata_init();
+
+    // -----------------------------------------------------------------------
+    // 6.5. PCI Enumeration — scan PCI bus
+    // -----------------------------------------------------------------------
+    pci.pci_init();
 
     // -----------------------------------------------------------------------
     // 7. Rust Core — initialize kernel policies, token system, VFS, IPC

@@ -30,6 +30,8 @@ pub struct RegistersContext {
     pub rax:    u64,
     pub rdi:    u64,
     pub rsi:    u64,
+    pub cs:     u64,
+    pub ss:     u64,
 }
 
 pub struct Thread {
@@ -43,6 +45,7 @@ pub struct Thread {
 pub struct Scheduler {
     pub threads:         VecDeque<Arc<Mutex<Thread>>>,
     pub next_thread_id:  u32,
+    pub active_thread:   Option<Arc<Mutex<Thread>>>,
 }
 
 impl Scheduler {
@@ -50,6 +53,7 @@ impl Scheduler {
         Scheduler {
             threads: VecDeque::new(),
             next_thread_id: 1,
+            active_thread: None,
         }
     }
 
@@ -60,6 +64,9 @@ impl Scheduler {
         let mut context = RegistersContext::default();
         context.rip = entry_point;
         context.rsp = 0x7FFFFFFF0000; // Default user stack top
+        context.cs = 0x1B; // USER_CODE_SEL
+        context.ss = 0x23; // USER_DATA_SEL
+        context.rflags = 0x202; // IF=1, reserved bit 1=1
 
         let thread = Arc::new(Mutex::new(Thread {
             id: t_id,
@@ -89,6 +96,7 @@ impl Scheduler {
                 thread.state = ThreadState::Ready; // Preempted — back to ready
                 drop(thread);
                 self.threads.push_back(Arc::clone(&thread_arc));
+                self.active_thread = Some(Arc::clone(&thread_arc));
                 return Some(thread_arc);
             } else {
                 drop(thread);

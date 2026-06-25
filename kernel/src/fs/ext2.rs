@@ -187,7 +187,72 @@ impl Ext2Fs {
             }
         }
         
-        // TODO: Support singly/doubly/triply indirect blocks
+        let pointers_per_block = self.block_size / 4;
+        
+        let read_data_blocks = |pointers: &[u32], remain: &mut usize, out: &mut Vec<u8>| {
+            for &block in pointers {
+                if block == 0 || *remain == 0 { break; }
+                if let Some(block_data) = self.read_block(block, dm) {
+                    let to_copy = core::cmp::min(*remain, self.block_size);
+                    out.extend_from_slice(&block_data[0..to_copy]);
+                    *remain -= to_copy;
+                }
+            }
+        };
+
+        // Singly indirect
+        if remaining > 0 && inode.i_block[12] != 0 {
+            if let Some(indirect_block) = self.read_block(inode.i_block[12], dm) {
+                let pointers: &[u32] = unsafe {
+                    core::slice::from_raw_parts(indirect_block.as_ptr() as *const u32, pointers_per_block)
+                };
+                read_data_blocks(pointers, &mut remaining, &mut data);
+            }
+        }
+
+        // Doubly indirect
+        if remaining > 0 && inode.i_block[13] != 0 {
+            if let Some(d_indirect_block) = self.read_block(inode.i_block[13], dm) {
+                let d_pointers: &[u32] = unsafe {
+                    core::slice::from_raw_parts(d_indirect_block.as_ptr() as *const u32, pointers_per_block)
+                };
+                for &s_block in d_pointers {
+                    if s_block == 0 || remaining == 0 { break; }
+                    if let Some(s_indirect_block) = self.read_block(s_block, dm) {
+                        let pointers: &[u32] = unsafe {
+                            core::slice::from_raw_parts(s_indirect_block.as_ptr() as *const u32, pointers_per_block)
+                        };
+                        read_data_blocks(pointers, &mut remaining, &mut data);
+                    }
+                }
+            }
+        }
+
+        // Triply indirect
+        if remaining > 0 && inode.i_block[14] != 0 {
+            if let Some(t_indirect_block) = self.read_block(inode.i_block[14], dm) {
+                let t_pointers: &[u32] = unsafe {
+                    core::slice::from_raw_parts(t_indirect_block.as_ptr() as *const u32, pointers_per_block)
+                };
+                for &d_block in t_pointers {
+                    if d_block == 0 || remaining == 0 { break; }
+                    if let Some(d_indirect_block) = self.read_block(d_block, dm) {
+                        let d_pointers: &[u32] = unsafe {
+                            core::slice::from_raw_parts(d_indirect_block.as_ptr() as *const u32, pointers_per_block)
+                        };
+                        for &s_block in d_pointers {
+                            if s_block == 0 || remaining == 0 { break; }
+                            if let Some(s_indirect_block) = self.read_block(s_block, dm) {
+                                let pointers: &[u32] = unsafe {
+                                    core::slice::from_raw_parts(s_indirect_block.as_ptr() as *const u32, pointers_per_block)
+                                };
+                                read_data_blocks(pointers, &mut remaining, &mut data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
         data
     }

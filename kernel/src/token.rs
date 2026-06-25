@@ -9,6 +9,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use spin::Mutex;
 
@@ -21,7 +22,8 @@ pub struct Token {
     pub privilege:     PrivilegeLevel,
     pub parent:        Option<Weak<Mutex<Token>>>,
     pub children:      Vec<Arc<Mutex<Token>>>,
-    pub vmas:          Vec<Vma>,
+    pub vmas:          BTreeMap<usize, Vma>,
+    pub pml4_phys_addr: usize,
     pub memory_limit:  usize,
     pub memory_used:   usize,
     pub is_permanent:  bool,
@@ -41,5 +43,25 @@ impl Token {
         } else {
             current_tick > self.expiry_tick
         }
+    }
+
+    /// Checks if adding `size` bytes would exceed the token's memory limit.
+    pub fn check_quota(&self, size: usize) -> bool {
+        self.memory_used.saturating_add(size) <= self.memory_limit
+    }
+
+    /// Cleans up all memory associated with this token.
+    /// Should be called when the token expires or is explicitly killed.
+    pub fn cleanup(&mut self) {
+        for (_, vma) in self.vmas.iter() {
+            if !vma.phys_ptr.is_null() && vma.size > 0 {
+                let pages = (vma.size + 4095) / 4096;
+                unsafe { crate::vasm::phys_free(vma.phys_ptr, pages); }
+                // Also unmap the virtual address
+                unsafe { crate::vasm::page_table_unmap(vma.start_addr); }
+            }
+        }
+        self.vmas.clear();
+        self.memory_used = 0;
     }
 }
